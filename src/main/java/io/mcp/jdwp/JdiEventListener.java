@@ -91,6 +91,9 @@ public class JdiEventListener {
 					} else if (event instanceof ClassPrepareEvent cpEvent) {
 						handleClassPrepareEvent(cpEvent);
 						// Always resume — don't block class loading
+					} else if (event instanceof VMStartEvent) {
+						log.info("[JDI] VM started — keeping suspended for breakpoint setup");
+						hasBreakpointOrStep = true; // don't auto-resume
 					} else if (event instanceof VMDisconnectEvent || event instanceof VMDeathEvent) {
 						log.info("[JDI] VM disconnected/died, stopping event listener");
 						running = false;
