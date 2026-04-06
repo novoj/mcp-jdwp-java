@@ -1,500 +1,181 @@
-# Workflow de Développement - MCP JDWP Inspector
+# Development Workflow - MCP JDWP Inspector
 
-## Architecture de la Stack
+## Stack Architecture
 
 ```
 Claude Code (MCP Client)
     ↓
-MCP Server (mcp-jdwp-java) - Build: Gradle
-    ↓ Lance automatiquement
-debuggerX Proxy - Build: Maven
-    ↓
-JVM JDWP (Application Tomcat)
+MCP Server (mcp-jdwp-java) - Build: Maven
+    ↓ (JDI - Java Debug Interface)
+JVM JDWP (Tomcat Application, port JVM_JDWP_PORT=5005)
 ```
 
-**Composants:**
-- **MCP Server**: `C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\` (Gradle, Spring Boot)
-- **Proxy debuggerX**: `C:\Users\nicolasv\MCP_servers\debuggerX\` (Maven, Netty)
-- **JAR du proxy**: Doit être copié dans `C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\lib\debuggerX.jar`
+**Component:**
+- **MCP Server**: `C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\` (Maven, Spring Boot)
 
-## ⚠️ RÈGLE CRITIQUE AVANT TOUTE MODIFICATION
+## CRITICAL RULE BEFORE ANY MODIFICATION
 
-**AVANT de commencer à coder, TOUJOURS suivre ces étapes :**
+**BEFORE starting to code, ALWAYS follow these steps:**
 
-### Étape 1 : Désactiver le serveur MCP (TOUJOURS)
-1. **Demander à l'utilisateur** de désactiver le serveur MCP via `/mcp`
-2. Attendre confirmation avant de continuer
+### Step 1: Disable the MCP Server (ALWAYS)
+1. **Ask the user** to disable the MCP server via `/mcp`
+2. Wait for confirmation before continuing
 
-### Étape 2 : Arrêter le Proxy (SI modification de debuggerX uniquement)
-**🚨 Si et seulement si tu modifies le proxy debuggerX :**
+### Step 2: Code
+Now you can start modifying the code
 
-**Arrêt propre (OBLIGATOIRE) :**
+### Why is this critical?
+- The MCP server caches the JAR in memory
+- Modifications will NOT be visible without a restart
+- This avoids hours of unnecessary debugging
+
+## Complete Workflow
+
+### Modifying the MCP Server
+
 ```bash
-# 1. Arrêter proprement
-curl -X POST http://localhost:55006/shutdown
+# Step 1: Build the MCP server
+cd C:\Users\nicolasv\MCP_servers\mcp-jdwp-java
+mvn clean package -DskipTests
 
-# 2. Vérifier que c'est arrêté
-netstat -ano | findstr :55005
-# Doit retourner "Exit code 1" (aucun processus trouvé)
+# Step 2: Verify the build succeeded
+# Look for "BUILD SUCCESS" in the output
+powershell -Command "Get-Item C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\target\mcp-jdwp-java-1.0.0.jar | Select-Object Name, Length, LastWriteTime"
+
+# Step 3: Restart the MCP server in Claude Code
+# In Claude Code: /mcp (disable)
+# In Claude Code: /mcp (re-enable)
+# The new JAR will be loaded automatically
 ```
 
-**Si le shutdown échoue (FALLBACK uniquement) :**
+## Diagnostic Commands
+
+### Check if the target JVM is running with JDWP
 ```bash
-netstat -ano | findstr :55005
-# Noter le PID, puis utiliser PowerShell pour le tuer
-powershell -Command "Stop-Process -Id <PID> -Force"
+netstat -ano | findstr :5005
+# If a line with LISTENING appears -> JVM accessible
 ```
 
-### Étape 3 : Coder
-Maintenant tu peux commencer à modifier le code
+### Check the logs
 
-### Pourquoi c'est critique ?
-- Le serveur MCP cache le JAR en mémoire
-- Le proxy peut tourner avec l'ancien code
-- Les modifications ne seront PAS visibles sans redémarrage
-- Cela évite des heures de debugging inutile
-
-**RAPPEL : TOUJOURS désactiver le MCP, tuer le proxy seulement si nécessaire**
-
-## Problèmes Récurrents
-
-### ❌ Problème #1: Oublier d'arrêter le proxy avant rebuild
-**Symptôme**: Le proxy tourne avec l'ancien code après rebuild
-
-**Solution**: 🚨 **CRITIQUE** - TOUJOURS arrêter le proxy AVANT de rebuilder debuggerX
-
-**Méthode recommandée :**
-```bash
-curl -X POST http://localhost:55006/shutdown
-netstat -ano | findstr :55005  # Vérifier qu'il est arrêté
-```
-
-**Pourquoi c'est critique ?**
-- Le JAR ne peut pas être remplacé si le processus l'utilise
-- Le proxy continue avec l'ancien code
-- Les modifications ne sont JAMAIS visibles
-- Perte de temps énorme en debugging
-
-### ❌ Problème #2: Oublier de copier le JAR du proxy
-**Symptôme**: Le serveur MCP démarre l'ancien proxy même après rebuild
-
-**Solution**: Toujours copier `debuggerX.jar` vers `mcp-jdwp-java\lib\`
-
-### ❌ Problème #3: Oublier de désactiver/réactiver le serveur MCP
-**Symptôme**: Les modifications du serveur MCP ne sont pas prises en compte
-
-**Solution**: Utiliser `/mcp` dans Claude Code pour recharger la config
-
-### ❌ Problème #4: Build Maven qui tourne en boucle
-**Symptôme**: Maven ne termine jamais, CPU à 100%
-
-**Solution**: Utiliser `-DskipTests` pour éviter les tests qui peuvent bloquer
-
-### ❌ Problème #5: Port 55005 déjà utilisé
-**Symptôme**: Le proxy ne démarre pas car le port est occupé
-
-**Solution**: Tuer le processus qui écoute sur ce port
-
-### ❌ Problème #6: gradlew.bat ne s'exécute pas avec cmd
-**Symptôme**: `cmd /c gradlew.bat build` ne produit aucune sortie ou échoue
-
-**Solution**: Utiliser PowerShell au lieu de cmd
+MCP server log file: `C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\mcp-jdwp-inspector.log`
 
 ```bash
-# ❌ Ne fonctionne pas toujours
-cmd /c "cd /d C:\Users\nicolasv\MCP_servers\mcp-jdwp-java && gradlew.bat build"
-
-# ✅ Fonctionne avec PowerShell
-powershell -Command "cd C:\Users\nicolasv\MCP_servers\mcp-jdwp-java; .\gradlew.bat build"
-```
-
-**Quand utiliser PowerShell:**
-- Lors du build de modules Gradle ( mcp-jdwp-java)
-- Quand vous avez besoin de capturer la sortie du build
-- Pour utiliser des commandes comme `Select-Object`, `Get-Item`, etc.
-
-**Note:** Maven (mvn.cmd) fonctionne directement depuis bash avec le chemin complet, contrairement à Gradle qui nécessite PowerShell. Cette différence vient du wrapper gradlew.bat qui a des problèmes de redirection avec bash.
-
-### ❌ Problème #7: Faire les étapes manuellement au lieu d'utiliser le script
-**Symptôme**: Builder le proxy manuellement (Maven, copy, etc.) au lieu d'utiliser `build-and-copy.bat`
-
-**Solution**: ⚠️ **TOUJOURS utiliser le script automatique** pour rebuilder le proxy debuggerX
-
-```bash
-# ✅ CORRECT - Utiliser le script avec PowerShell
-powershell -Command "& 'C:\Users\nicolasv\MCP_servers\debuggerX\build-and-copy.bat'"
-
-# ❌ INCORRECT - Utiliser cmd /c (ne capture pas la sortie correctement depuis bash)
-# cmd /c "C:\Users\nicolasv\MCP_servers\debuggerX\build-and-copy.bat"
-
-# ❌ INCORRECT - Faire les étapes manuellement (erreurs possibles)
-# Ne PAS faire: mvn clean package puis copy puis...
-```
-
-**Pourquoi ?**
-- Le script automatise build + copy de manière fiable (plus besoin de kill manuel grâce à /shutdown)
-- Évite d'oublier une étape (comme copier le JAR)
-- Gère correctement les chemins Windows et encodage
-- **PowerShell est requis pour capturer la sortie depuis bash**
-- **Le script existe pour une raison - TOUJOURS l'utiliser !**
-
-## Workflow Complet
-
-### Scénario 1: Modifier le Proxy debuggerX
-
-**✅ CHECKLIST OBLIGATOIRE POUR MODIFICATION DU PROXY :**
-
-- [ ] Désactiver le serveur MCP (`/mcp` dans Claude Code)
-- [ ] **Arrêter le proxy avec shutdown** (`curl -X POST http://localhost:55006/shutdown`)
-- [ ] **Vérifier que le proxy est arrêté** (`netstat -ano | findstr :55005` → doit échouer)
-- [ ] Builder avec le script automatique
-- [ ] Réactiver le MCP et tester
-
-**⚠️ WORKFLOW COMPLET (recommandé) :**
-
-```bash
-# ÉTAPE 1: Arrêter proprement le proxy (CRITIQUE - NE PAS OUBLIER!)
-curl -X POST http://localhost:55006/shutdown
-
-# ÉTAPE 2: Vérifier que le proxy est arrêté
-netstat -ano | findstr :55005
-# Doit retourner "Exit code 1" (aucun résultat)
-
-# ÉTAPE 3: Builder avec le script automatique
-powershell -Command "& 'C:\Users\nicolasv\MCP_servers\debuggerX\build-and-copy.bat'"
-
-# Le script fait automatiquement:
-# 1. Build Maven avec -DskipTests
-# 2. Copie le JAR dans lib/
-
-# ÉTAPE 4: Redémarrer le serveur MCP dans Claude Code
-# Dans Claude Code: /mcp (réactiver)
-# Dans Claude Code: "Connecte-toi" → jdwp_connect()
-```
-
-**Méthode manuelle (NON recommandée - utiliser seulement si le script échoue) :**
-
-```bash
-# Étape 1: Tuer le proxy actuel (CRITIQUE!)
-netstat -ano | findstr :55005
-# Noter le PID (dernière colonne)
-powershell -Command "Stop-Process -Id <PID> -Force"
-
-# Étape 5: Redémarrer le serveur MCP dans Claude Code
-# Dans Claude Code: /mcp (désactiver)
-# Dans Claude Code: /mcp (réactiver)
-# Dans Claude Code: "Connecte-toi" → jdwp_connect()
-```
-
-### Scénario 2: Modifier le Serveur MCP
-
-```bash
-# Étape 1: Builder le serveur MCP (avec PowerShell recommandé)
-powershell -Command "cd C:\Users\nicolasv\MCP_servers\mcp-jdwp-java; .\gradlew.bat build"
-
-# Étape 2: Vérifier que le build a réussi
-# Chercher "BUILD SUCCESSFUL" dans la sortie
-powershell -Command "Get-Item C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\build\libs\mcp-jdwp-java-1.0.0.jar | Select-Object Name, Length, LastWriteTime"
-
-# Étape 3: Redémarrer le serveur MCP dans Claude Code
-# Dans Claude Code: /mcp (désactiver)
-# Dans Claude Code: /mcp (réactiver)
-# Le nouveau JAR sera chargé automatiquement
-
-## Commandes de Diagnostic
-
-### Vérifier si le proxy tourne
-```bash
-netstat -ano | findstr :55005
-# Si une ligne avec LISTENING apparaît → proxy actif
-```
-
-### Vérifier quand le proxy a démarré
-```bash
-# Trouver le PID
-netstat -ano | findstr :55005
-# Le PID est dans la dernière colonne (ex: 88660)
-
-# Voir l'heure de démarrage
-powershell -Command "Get-Process -Id 88660 | Select-Object Id, ProcessName, StartTime"
-```
-
-### Trouver le PID du proxy
-```bash
-# Méthode 1: Par port
-netstat -ano | findstr :55005
-# Le PID est dans la dernière colonne
-
-# Méthode 2: Par ligne de commande
-wmic process where "CommandLine like '%debuggerX.jar%'" get ProcessId,CommandLine
-```
-
-### Tuer le proxy
-```bash
-# ⚠️ TOUJOURS utiliser PowerShell (taskkill a des problèmes d'encodage avec bash)
-powershell -Command "Stop-Process -Id <PID> -Force"
-```
-
-### Vérifier les logs
-
-Tous les fichiers de logs sont dans le répertoire du serveur MCP : `C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\`
-
-```bash
-# ⭐ LOGS DU SERVEUR MCP (SLF4J - PRINCIPAL)
-# Contient les logs de JDIConnectionService, InMemoryJavaCompiler, JdiExpressionEvaluator
 type C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\mcp-jdwp-inspector.log
-
-# Logs du proxy debuggerX (connexion, événements JDWP)
-type C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\debuggerx-proxy.log
 ```
 
-**📍 Emplacement des logs MCP : `C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\mcp-jdwp-inspector.log`**
+**MCP log contents:**
+- Classpath discovery messages (`[JDI] Discovering classpath...`)
+- Expression compilation (`[Compiler] Compilation successful...`)
+- Expression evaluation (`[Evaluator] Compiler classpath configured...`)
+- JDI breakpoint/step events (`[JDI] Breakpoint X hit on thread Y...`)
+- All exceptions with complete stack traces
 
-**Contenu des logs MCP :**
-- Messages de découverte du classpath (`[JDI] Discovering classpath...`)
-- Compilation d'expressions (`[Compiler] Compilation successful...`)
-- Évaluation d'expressions (`[Evaluator] Compiler classpath configured...`)
-- Toutes les exceptions avec stack traces complètes
+## Using MCP JDWP Tools
 
-### Tester l'API HTTP du proxy
-```bash
-# Le serveur HTTP démarre sur proxyPort + 1 = 55006
-curl http://localhost:55006/breakpoints
-```
+### Stack Inspection Workflow
 
-## Utilisation des Outils MCP JDWP
-
-### Workflow d'Inspection de Stack
-
-**IMPORTANT**: Toujours utiliser `jdwp_get_current_thread()` avant `jdwp_inspect_stack()` pour inspecter le thread au breakpoint actuel :
+**IMPORTANT**: Always use `jdwp_get_current_thread()` before `jdwp_get_stack()` to inspect the thread at the current breakpoint:
 
 ```
-1. Déclencher un breakpoint dans l'application
-2. Appeler jdwp_get_current_thread() pour obtenir le threadId
-3. Utiliser le threadId retourné pour appeler jdwp_inspect_stack(threadId)
+1. Trigger a breakpoint in the application
+2. Call jdwp_get_current_thread() to get the threadId
+3. Use the returned threadId to call jdwp_get_stack(threadId)
 ```
 
-**Exemple d'utilisation correcte :**
-```
-User: [Déclenche un breakpoint]
-Assistant: jdwp_get_current_thread()
-Result: { "threadId": 26872, "threadName": "http-nio-8080-exec-10" }
-Assistant: jdwp_inspect_stack(26872)
-```
+### Available Tools
 
-**Pourquoi cette approche ?**
-- `jdwp_get_current_thread()` récupère automatiquement le thread du breakpoint actuel via le proxy
-- Permet d'inspecter plusieurs threads en passant différents threadId
-- Évite de deviner le threadId manuellement
-
-### Outils Disponibles
-
-#### Connexion et Navigation
-- **jdwp_connect** - Se connecter à la JVM cible
-- **jdwp_get_current_thread** - Obtenir le threadId du breakpoint actuel
-- **jdwp_get_threads** - Lister tous les threads (utile pour inspecter d'autres threads)
+#### Connection and Navigation
+- **jdwp_connect** - Connect to the target JVM
+- **jdwp_get_current_thread** - Get the threadId of the current breakpoint
+- **jdwp_get_threads** - List all threads
 
 #### Inspection
-- **jdwp_get_stack(threadId)** - Obtenir les frames de la stack (méthode classique JDWP)
-- **jdwp_get_locals(threadId, frameIndex)** - Obtenir les variables locales d'une frame
-- **jdwp_get_fields(objectId)** - Obtenir les champs d'un objet
+- **jdwp_get_stack(threadId)** - Get the stack frames
+- **jdwp_get_locals(threadId, frameIndex)** - Get the local variables of a frame
+- **jdwp_get_fields(objectId)** - Get the fields of an object
 
-#### Breakpoints et Exécution
-- **jdwp_set_breakpoint(className, lineNumber)** - Poser un breakpoint
-- **jdwp_list_breakpoints** - Lister tous les breakpoints
-- **jdwp_clear_breakpoint_by_id(requestId)** - Supprimer un breakpoint
-- **jdwp_resume** - Reprendre l'exécution
+#### Breakpoints and Execution
+- **jdwp_set_breakpoint(className, lineNumber)** - Set a breakpoint (returns an ID)
+- **jdwp_list_breakpoints** - List all breakpoints
+- **jdwp_clear_breakpoint_by_id(breakpointId)** - Remove a breakpoint
+- **jdwp_clear_all_breakpoints** - Remove all breakpoints
+- **jdwp_resume** - Resume execution of all threads
+- **jdwp_suspend_thread(threadId)** - Suspend a specific thread
+- **jdwp_resume_thread(threadId)** - Resume a specific thread
 
-#### Évaluation d'Expressions (Watchers)
-- **jdwp_attach_watcher(breakpointId, label, expression)** - Attacher un watcher à un breakpoint
-- **jdwp_evaluate_watchers(threadId, scope, breakpointId)** - Évaluer les expressions des watchers
-- **jdwp_list_all_watchers()** - Lister tous les watchers actifs
-- **jdwp_detach_watcher(watcherId)** - Détacher un watcher
+#### Expression Evaluation (Watchers)
+- **jdwp_attach_watcher(breakpointId, label, expression)** - Attach a watcher to a breakpoint
+- **jdwp_evaluate_watchers(threadId, scope, breakpointId)** - Evaluate watcher expressions
+- **jdwp_list_all_watchers()** - List all active watchers
+- **jdwp_detach_watcher(watcherId)** - Detach a watcher
 
-### Évaluation d'Expressions
+### Expression Evaluation
 
-Le serveur MCP permet d'évaluer des expressions Java arbitraires dans le contexte d'un thread suspendu à un breakpoint.
+The MCP server allows evaluating arbitrary Java expressions in the context of a thread suspended at a breakpoint.
 
-**Documentation complète**: Voir [EXPRESSION_EVALUATION.md](EXPRESSION_EVALUATION.md)
+**Complete documentation**: See [EXPRESSION_EVALUATION.md](EXPRESSION_EVALUATION.md)
 
-**Workflow typique**:
+**Typical workflow**:
 ```
-1. Déclencher un breakpoint
-2. Obtenir le threadId: jdwp_get_current_thread()
-3. Attacher un watcher: jdwp_attach_watcher(breakpointId=27, label="Test", expression="request.getData()")
-4. Évaluer: jdwp_evaluate_watchers(threadId=26162, scope="current_frame", breakpointId=27)
+1. Set a breakpoint: jdwp_set_breakpoint("com.example.MyClass", 42) -> ID: 1
+2. Trigger the breakpoint
+3. Get the threadId: jdwp_get_current_thread()
+4. Attach a watcher: jdwp_attach_watcher(breakpointId=1, label="Test", expression="request.getData()")
+5. Evaluate: jdwp_evaluate_watchers(threadId=26162, scope="current_frame", breakpointId=1)
 ```
 
-**Exemples d'expressions**:
+**Expression examples**:
 ```java
 // Strings
-"Hello World"                    → "Hello World"
+"Hello World"                    -> "Hello World"
 
 // Primitives
-42 + 10                          → 52
+42 + 10                          -> 52
 
-// Variables locales
-request.getData()                → Object#33761 (java.util.LinkedHashMap)
+// Local variables
+request.getData()                -> Object#33761 (java.util.LinkedHashMap)
 
 // Navigation
-request.getData().size()         → 5
+request.getData().size()         -> 5
 
-// Utilisation de 'this'
-this.getClass().getName()        → "com.axelor.web.service.RestService"
+// Using 'this'
+this.getClass().getName()        -> "com.axelor.web.service.RestService"
 ```
 
-**Points clés**:
-- ✅ Compile avec le classpath complet de l'application (571 entrées)
-- ✅ Résout automatiquement les proxies (Guice, CGLIB)
-- ✅ Cache les compilations pour performance
-- ✅ Gère strings, primitives, objets et arrays
-- ⚠️ Nécessite que le thread soit suspendu à un breakpoint
+## Checklist Before Testing
 
-## Checklist Avant de Tester
+- [ ] The MCP server has been built ("BUILD SUCCESS" in Maven)
+- [ ] The MCP server has been restarted in Claude Code (`/mcp` disable + re-enable)
+- [ ] The target JVM is running with JDWP on port 5005 (`netstat -ano | findstr :5005`)
 
-- [ ] Le proxy a été tué (vérifier avec `netstat -ano | findstr :55005`)
-- [ ] Le proxy a été buildé avec succès ("BUILD SUCCESS" dans Maven)
-- [ ] Le JAR du proxy a été copié dans `lib/` (vérifier la date de modification)
-- [ ] Le serveur MCP a été buildé (si modifié) ("BUILD SUCCESSFUL" dans Gradle)
-- [ ] Le serveur MCP a été redémarré dans Claude Code (`/mcp` désactiver + réactiver)
-- [ ] La JVM cible tourne avec JDWP sur port 61959 (`netstat -ano | findstr :61959`)
+## Port Used
 
-## Structure des Répertoires
-
-```
-C:\Users\nicolasv\MCP_servers\
-├── mcp-jdwp-java\              # Serveur MCP (Gradle)
-│   ├── build\
-│   │   └── libs\
-│   │       └── mcp-jdwp-java-1.0.0.jar  # JAR du serveur MCP
-│   ├── lib\
-│   │   └── debuggerX.jar       # ⚠️ JAR du proxy (COPIÉ DEPUIS debuggerX/)
-│   ├── src\
-│   ├── build.gradle
-│   ├── gradlew.bat
-│   ├── README.md
-│   ├── WORKFLOW.md             # Ce fichier
-│   └── debuggerx-proxy.log     # Logs du proxy
-│
-└── debuggerX\                  # Proxy JDWP (Maven)
-    ├── debuggerx-bootstrap\
-    │   └── target\
-    │       └── debuggerx-bootstrap-1.0-SNAPSHOT.jar   # JAR source du proxy
-    ├── debuggerx-core\
-    ├── debuggerx-protocol\
-    ├── pom.xml
-    └── README.md
-```
-
-## Ports Utilisés
-
-| Port  | Service                    | Vérification                     |
+| Port  | Service                    | Verification                     |
 |-------|----------------------------|----------------------------------|
-| 61959 | JVM JDWP                   | `netstat -ano \| findstr :61959` |
-| 55005 | Proxy debuggerX            | `netstat -ano \| findstr :55005` |
-| 55006 | HTTP API du proxy          | `curl http://localhost:55006/breakpoints` |
+| 5005 | JVM JDWP                   | `netstat -ano \| findstr :5005` |
 
-## Scripts Utiles
+## Important Notes
 
-### Script de Kill Automatique du Proxy
-Créer `kill-proxy.bat`:
-```batch
-@echo off
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr :55005 ^| findstr LISTENING') do (
-    echo Killing proxy process %%a
-    powershell -Command "Stop-Process -Id %%a -Force"
-)
-```
+1. **The MCP server loads the JAR at startup**: JAR modifications are only taken into account after restarting the MCP server via `/mcp`.
 
-### Script de Build Complet
-Créer `build-and-copy.bat`:
-```batch
-@echo off
-echo === Killing proxy ===
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr :55005 ^| findstr LISTENING') do (
-    powershell -Command "Stop-Process -Id %%a -Force"
-)
+2. **Code modifications require a rebuild**: Java does not allow hot-reload for this type of application.
 
-echo === Building proxy ===
-cd C:\Users\nicolasv\MCP_servers\debuggerX
-call "C:\Program Files\JetBrains\IntelliJ IDEA 2025.2.3\plugins\maven\lib\maven3\bin\mvn.cmd" clean package -DskipTests
+3. **Always check the logs**: In case of issues, consult `mcp-jdwp-inspector.log` in the MCP server directory.
 
-echo === Copying JAR ===
-copy debuggerx-bootstrap\target\debuggerx-bootstrap-1.0-SNAPSHOT.jar ..\mcp-jdwp-java\lib\debuggerX.jar
+4. **Presenting code to the user**: Always use markdown code blocks to display code.
 
-echo === Done ===
-echo Next: Restart MCP server in Claude Code (/mcp)
-```
-
-## Notes Importantes
-
-1. **Le proxy se lance automatiquement**: Quand vous faites `jdwp_connect`, le serveur MCP vérifie si le proxy tourne et le démarre si nécessaire.
-
-2. **Le serveur MCP charge le JAR au démarrage**: Les modifications du JAR ne sont prises en compte qu'après un redémarrage du serveur MCP via `/mcp`.
-
-3. **Les modifications de code nécessitent un rebuild**: Java ne permet pas le hot-reload pour ce type d'application.
-
-4. **Toujours vérifier les logs**: En cas de problème, consulter `debuggerx-proxy.log` dans le répertoire du serveur MCP.
-
-5. **Port HTTP incorrect dans l'ancienne doc**: Le port HTTP est `proxyPort + 1 = 55006`, PAS 8765.
-
-6. **Présentation de code à l'utilisateur**: Toujours utiliser des blocs de code markdown (```java ... ```) pour afficher du code. Ne JAMAIS utiliser la sortie brute d'outils comme Read ou Grep pour présenter du code à l'utilisateur.
-
-7. **Gestion des exceptions**: TOUJOURS utiliser un logger (SLF4J) dans TOUS les blocs catch pour tracer les exceptions dans les fichiers de logs. Ne JAMAIS se contenter de retourner un message d'erreur sans logger l'exception.
+5. **Exception handling**: ALWAYS use a logger (SLF4J) in ALL catch blocks to trace exceptions in log files.
 
 ```java
-// ❌ INCORRECT - Retourne l'erreur mais ne la trace pas dans les logs
+// INCORRECT - Returns the error but does not trace it in the logs
 } catch (Exception e) {
     return "ERROR: " + e.getMessage();
 }
 
-// ✅ CORRECT - Logger l'exception avant de retourner l'erreur
+// CORRECT - Log the exception before returning the error
 } catch (Exception e) {
-    log.error("[JDWP] Description de l'erreur", e);
+    log.error("[JDWP] Error description", e);
     return "ERROR: " + e.getMessage();
 }
-```
-
-**Pourquoi c'est critique ?**
-- Les exceptions doivent être tracées dans les fichiers de logs pour le diagnostic
-- Les messages retournés à l'utilisateur sont éphémères
-- Les logs persistent et permettent l'analyse post-mortem
-- Le logger SLF4J inclut automatiquement la stack trace complète
-
-## Dépannage
-
-### Le proxy ne démarre pas
-```bash
-# Vérifier que le port est libre
-netstat -ano | findstr :55005
-
-# Vérifier le JAR existe
-dir C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\lib\debuggerX.jar
-
-# Consulter les logs
-type C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\debuggerx-proxy.log
-```
-
-### Les modifications ne sont pas prises en compte
-```bash
-# Vérifier la date du JAR
-powershell -Command "Get-Item C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\lib\debuggerX.jar | Select-Object LastWriteTime"
-
-# Comparer avec le JAR source
-powershell -Command "Get-Item C:\Users\nicolasv\MCP_servers\debuggerX\debuggerx-bootstrap\target\debuggerx-bootstrap-1.0-SNAPSHOT.jar | Select-Object LastWriteTime"
-
-# Si les dates diffèrent → re-copier
-copy C:\Users\nicolasv\MCP_servers\debuggerX\debuggerx-bootstrap\target\debuggerx-bootstrap-1.0-SNAPSHOT.jar C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\lib\debuggerX.jar
-```
-
-### Build Maven bloqué
-```bash
-# Trouver le PID du processus Maven
-tasklist | findstr mvn
-
-# Tuer le processus avec PowerShell
-powershell -Command "Stop-Process -Name 'mvn' -Force"
-
-# Relancer avec skip tests et PowerShell
-powershell -Command "cd C:\Users\nicolasv\MCP_servers\debuggerX; & 'C:\Program Files\JetBrains\IntelliJ IDEA 2025.2.3\plugins\maven\lib\maven3\bin\mvn.cmd' clean package -DskipTests"
 ```

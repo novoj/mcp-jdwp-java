@@ -1,82 +1,77 @@
 # MCP JDWP Inspector
 
-Serveur MCP (Model Context Protocol) pour inspecter et **contrôler** des applications Java en temps réel via JDWP en utilisant JDI (Java Debug Interface).
+MCP (Model Context Protocol) server for inspecting and **controlling** Java applications in real time via JDWP using JDI (Java Debug Interface).
 
-Permet à Claude Code d'inspecter l'état d'une JVM pendant l'exécution ET de contrôler l'exécution (resume, step over, step into, step out).
+Allows Claude Code to inspect the state of a JVM during execution AND control execution (resume, step over, step into, step out).
 
 ## Architecture
 
 ```
 Claude Code
     ↓ (MCP Protocol via STDIO)
-Spring Boot MCP Server (21 tools)
+Spring Boot MCP Server
     ↓ (JDI - Java Debug Interface)
 JDWP Protocol
     ↓
-debuggerX Proxy (port DEBUGGERX_PROXY_PORT=55005)
-    ↓
-Tomcat/Application Java (port JVM_JDWP_PORT=61959)
+Tomcat/Application Java (port JVM_JDWP_PORT=5005)
 ```
 
-**Ports configurables:**
-- `JVM_JDWP_PORT` (défaut: 61959) - Port JDWP de la JVM
-- `DEBUGGERX_PROXY_PORT` (défaut: 55005) - Port du proxy (IntelliJ + MCP Inspector)
+**Configurable port:**
+- `JVM_JDWP_PORT` (default: 5005) - JVM JDWP port
 
-**Note:** debuggerX est un proxy qui permet à plusieurs debuggers de se connecter simultanément. Voir [lib/debuggerX-README.md](lib/debuggerX-README.md) pour plus de détails.
+## Features
 
-## Fonctionnalités
+✅ **Complete inspection**
+- Thread listing with status
+- Full stack traces
+- Local variables at each frame
+- Object fields with recursive navigation
 
-✅ **Inspection complète**
-- Liste des threads avec statut
-- Stack traces complètes
-- Variables locales à chaque frame
-- Champs d'objets avec navigation récursive
+✅ **Smart collections**
+- Optimized views for ArrayList, LinkedHashMap, HashSet
+- Content display (elements, key=value entries)
+- Array navigation
 
-✅ **Collections intelligentes**
-- Vues optimisées pour ArrayList, LinkedHashMap, HashSet
-- Affichage du contenu (éléments, entrées key=value)
-- Navigation dans les tableaux
-
-✅ **Contrôle d'exécution**
-- Resume/Suspend de threads
+✅ **Execution control**
+- Resume/Suspend threads
 - Step Over, Step Into, Step Out
-- Gestion des breakpoints (set/clear/list)
-- Contrôle total du debugger via IA
+- Breakpoint management (set/clear/list)
+- Full debugger control via AI
 
-✅ **Surveillance d'événements**
-- Capture tous les événements JDWP en temps réel
-- Détection des breakpoints (même ceux posés par IntelliJ)
-- Monitoring des steps, exceptions, modifications de threads
-- Historique des 100 derniers événements
+✅ **Event monitoring**
+- Captures all JDWP events in real time
+- Breakpoint detection
+- Step, exception, and thread modification monitoring
+- History of the last 100 events
 
-✅ **Évaluation d'expressions (Watchers)**
-- Évaluation d'expressions Java arbitraires au breakpoint
-- Compilation dynamique avec classpath complet (571 entrées)
-- Support des strings, primitives, objets et méthodes
-- Cache de compilation pour performance
-- Gestion automatique des proxies (Guice, CGLIB)
+✅ **Expression evaluation (Watchers)**
+- Evaluation of arbitrary Java expressions at breakpoints
+- Dynamic compilation with full classpath (571 entries)
+- Support for strings, primitives, objects, and methods
+- Compilation cache for performance
+- Automatic proxy handling (Guice, CGLIB)
 
 
-## Prérequis
+## Prerequisites
 
-- **JDK 17+** (avec `tools.jar` pour JDI)
-- **Gradle 8.11+** (inclus via wrapper)
-- **Application Java en mode debug JDWP**
+- **JDK 17+** (with `tools.jar` for JDI)
+- **Maven 3.8+** (included via wrapper)
+- **Java application in JDWP debug mode**
 
 ## Installation
 
-### 1. Build du projet
+### 1. Build the project
 
 ```bash
 cd mcp-jdwp-java
-./gradlew.bat build
+mvn clean package -DskipTests
 ```
 
-Cela crée : `build/libs/mcp-jdwp-java-1.0.0.jar` (23 MB)
+This creates: `target/mcp-jdwp-java-1.0.0.jar`
 
-### 2. Configuration Claude Code
+### 2. Claude Code configuration
 
-Dans `.mcp.json` (à la racine de votre projet) :
+In `.mcp.json` (at the root of your project):
 
 ```json
 {
@@ -84,101 +79,94 @@ Dans `.mcp.json` (à la racine de votre projet) :
     "jdwp-inspector": {
       "command": "java",
       "args": [
-        "-DHOME=C:/Users/nicolasv/MCP_servers/mcp-jdwp-java",
-        "-DJVM_JDWP_PORT=61959",
-        "-DDEBUGGERX_PROXY_PORT=55005",
+        "--add-modules", "jdk.jdi",
         "-jar",
-        "C:/Users/nicolasv/MCP_servers/mcp-jdwp-java/build/libs/mcp-jdwp-java-1.0.0.jar"
+        "C:/Users/nicolasv/MCP_servers/mcp-jdwp-java/target/mcp-jdwp-java-1.0.0.jar"
       ]
     }
   }
 }
 ```
 
-**Paramètres configurables :**
-- `-DHOME` : Chemin vers le dossier mcp-jdwp-java (requis)
-- `-DJVM_JDWP_PORT` : Port où la JVM écoute (défaut: 61959)
-- `-DDEBUGGERX_PROXY_PORT` : Port du proxy debuggerX (défaut: 55005)
+**Configurable parameters:**
+- `-DJVM_JDWP_PORT` : Port where the JVM listens (default: 5005)
 
-**Note:** La capture des exceptions (caught/uncaught) et les filtres se configurent dynamiquement via l'outil `jdwp_configure_exception_monitoring`.
+**Note:** Exception capture (caught/uncaught) and filters are configured dynamically via the `jdwp_configure_exception_monitoring` tool.
 
-### 3. Redémarrer Claude Code
+### 3. Restart Claude Code
 
-Pour que la nouvelle config MCP soit prise en compte.
+To apply the new MCP configuration.
 
-## Utilisation
+## Usage
 
-### Étape 1: Lancer votre application Java en mode RUN avec JDWP activé
+### Step 1: Launch your Java application with JDWP enabled
 
-**Exemple avec Tomcat dans IntelliJ:**
+**Option A: Maven Surefire (recommended for testing)**
 
-Lancer en mode **RUN** (pas Debug) avec les VM Options suivantes:
-```
--agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:61959
+Add the debug flag to your Maven test command:
+```bash
+mvn test -Dmaven.surefire.debug
 ```
 
-L'application démarre normalement et écoute sur le port `JVM_JDWP_PORT=61959`.
+This automatically starts the JVM with JDWP listening on port **5005** and suspends execution until a debugger connects. To use a different port or non-suspending mode:
+```bash
+mvn test -Dmaven.surefire.debug="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
+```
 
-### Étape 2: Connecter IntelliJ Remote Debug (optionnel)
+**Option B: JVM argument (any Java application)**
 
-Remote Debug Configuration sur `localhost:55005` (port `DEBUGGERX_PROXY_PORT`)
+Add the following VM option to your application launch configuration:
+```
+-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005
+```
 
-Cela permet de mettre des breakpoints via IntelliJ tout en inspectant simultanément via Claude Code.
+The application starts normally and listens on port `JVM_JDWP_PORT=5005`.
 
-**Note:** debuggerX (le proxy JDWP) se lance **automatiquement** lors de la première connexion.
-
-### Étape 3: Utiliser le MCP JDWP Inspector dans Claude Code
+### Step 2: Use the MCP JDWP Inspector in Claude Code
 
 ```
-Moi: "Connecte-toi à l'inspector"
+Me: "Connect to the inspector"
 
 Claude: jdwp_connect()
-→ Lance debuggerX automatiquement si nécessaire
-→ Se connecte au JDWP sur localhost:55005 (depuis la config .mcp.json)
-→ Prêt à inspecter !
+→ Connects to JDWP on localhost:5005
+→ Ready to inspect!
 
-Moi: "J'ai un breakpoint actif, peux-tu analyser la requête?"
+Me: "I have an active breakpoint, can you analyze the request?"
 
 Claude:
-1. Liste les threads
-2. Trouve le thread suspendu
-3. Inspecte la stack
-4. Récupère les variables locales
-5. Navigue dans les objets
-6. Appelle des méthodes pour plus d'infos
-7. Analyse le problème
+1. Lists threads
+2. Finds the suspended thread
+3. Inspects the stack
+4. Retrieves local variables
+5. Navigates through objects
+6. Analyzes the problem
 ```
 
-**debuggerX permet à plusieurs debuggers (IntelliJ + MCP Inspector) de se connecter simultanément.**
-
-Pour plus de détails sur le fonctionnement du routage multi-debuggers, voir [lib/debuggerX-README.md](lib/debuggerX-README.md).
-
-## Outils MCP disponibles (30)
+## Available MCP tools (30)
 
 ### 1. `jdwp_connect`
-Se connecter au serveur JDWP en utilisant la configuration de `.mcp.json`.
+Connect to the JDWP server using the configuration from `.mcp.json`.
 
-**Paramètres:** Aucun (utilise automatiquement les ports configurés dans `.mcp.json`)
+**Parameters:** None (automatically uses the ports configured in `.mcp.json`)
 
-**Comportement:**
-- Lit automatiquement `DEBUGGERX_PROXY_PORT` depuis les propriétés système
-- Se connecte à `localhost` sur le port configuré (défaut: 55005)
-- Lance automatiquement debuggerX si nécessaire
+**Behavior:**
+- Automatically reads `JVM_JDWP_PORT` from system properties
+- Connects to `localhost` on the configured port (default: 5005)
 
-**Exemple:**
+**Example:**
 ```
 jdwp_connect()
 ```
 
 ### 2. `jdwp_disconnect`
-Se déconnecter du serveur JDWP.
+Disconnect from the JDWP server.
 
-**Note:** Ne tue pas debuggerX, nettoie juste la référence locale.
+**Note:** Sends a Dispose command to the JDWP server for a clean disconnection.
 
 ### 3. `jdwp_get_version`
-Obtenir les informations sur la JVM connectée.
+Get information about the connected JVM.
 
-**Retourne:**
+**Returns:**
 ```
 VM: OpenJDK 64-Bit Server VM
 Version: 11.0.21
@@ -186,16 +174,16 @@ Description: Java Debug Interface...
 ```
 
 ### 4. `jdwp_get_threads`
-Lister tous les threads de la JVM avec leur statut.
+List all JVM threads with their status.
 
-**Retourne:** Pour chaque thread:
-- ID unique
-- Nom
-- Statut (1=RUNNING, 4=WAITING, etc.)
-- Suspendu (true/false)
-- Nombre de frames (si suspendu)
+**Returns:** For each thread:
+- Unique ID
+- Name
+- Status (1=RUNNING, 4=WAITING, etc.)
+- Suspended (true/false)
+- Number of frames (if suspended)
 
-**Exemple de sortie:**
+**Example output:**
 ```
 Found 42 threads:
 
@@ -211,21 +199,21 @@ Thread 14:
   Name: http-nio-8080-exec-1
   Status: 1
   Suspended: true
-  Frames: 93  ← Thread avec breakpoint actif
+  Frames: 93  ← Thread with active breakpoint
 ```
 
 ### 5. `jdwp_get_stack`
-Obtenir la call stack complète d'un thread (doit être suspendu).
+Get the full call stack of a thread (must be suspended).
 
-**Paramètres:**
-- `threadId` (long) : ID du thread (obtenu via get_threads)
+**Parameters:**
+- `threadId` (long) : Thread ID (obtained via get_threads)
 
-**Exemple:**
+**Example:**
 ```
 jdwp_get_stack(threadId=15)
 ```
 
-**Retourne:**
+**Returns:**
 ```
 Stack trace for thread 15 (http-nio-8080-exec-1) - 93 frames:
 
@@ -237,38 +225,38 @@ Frame 1:
 ```
 
 ### 6. `jdwp_get_locals`
-Obtenir les variables locales d'une frame spécifique.
+Get local variables of a specific frame.
 
-**Paramètres:**
-- `threadId` (long) : ID du thread
-- `frameIndex` (int) : Index de la frame (0 = frame courante, 1 = caller, etc.)
+**Parameters:**
+- `threadId` (long) : Thread ID
+- `frameIndex` (int) : Frame index (0 = current frame, 1 = caller, etc.)
 
-**Exemple:**
+**Example:**
 ```
 jdwp_get_locals(threadId=15, frameIndex=0)
 ```
 
-**Retourne:**
+**Returns:**
 ```
 Local variables in frame 0:
 
 request (com.axelor.rpc.Request) = Object#26886 (com.axelor.rpc.Request)
 ```
 
-Tous les objets sont automatiquement mis en cache pour inspection ultérieure.
+All objects are automatically cached for later inspection.
 
 ### 7. `jdwp_get_fields`
-Obtenir les champs d'un objet (ou les éléments d'une collection/array).
+Get the fields of an object (or the elements of a collection/array).
 
-**Paramètres:**
-- `objectId` (long) : ID de l'objet (obtenu via get_locals ou get_fields)
+**Parameters:**
+- `objectId` (long) : Object ID (obtained via get_locals or get_fields)
 
-**Exemple:**
+**Example:**
 ```
 jdwp_get_fields(objectId=26886)  # request object
 ```
 
-**Retourne pour un objet:**
+**Returns for an object:**
 ```
 Object #26886 (com.axelor.rpc.Request):
 
@@ -279,7 +267,7 @@ java.util.Map data = Object#26936 (java.util.LinkedHashMap)
 ...
 ```
 
-**Retourne pour une ArrayList:**
+**Returns for an ArrayList:**
 ```
 Object #26935 (java.util.ArrayList):
 
@@ -292,7 +280,7 @@ Elements:
 ...
 ```
 
-**Retourne pour une LinkedHashMap:**
+**Returns for a LinkedHashMap:**
 ```
 Object #26936 (java.util.LinkedHashMap):
 
@@ -306,7 +294,7 @@ Entries:
 ...
 ```
 
-**Retourne pour un array:**
+**Returns for an array:**
 ```
 Array #26944 (java.lang.Object[]) - 10 elements:
 
@@ -316,88 +304,88 @@ Array #26944 (java.lang.Object[]) - 10 elements:
 ...
 ```
 
-**Collections supportées:**
+**Supported collections:**
 - `ArrayList`, `LinkedList`
 - `HashMap`, `LinkedHashMap`, `TreeMap`
 - `HashSet`, `TreeSet`
 - Arrays (Object[], int[], etc.)
 
 ### 9. `jdwp_resume`
-Reprendre l'exécution de tous les threads dans la VM.
+Resume execution of all threads in the VM.
 
-**Paramètres:** Aucun
+**Parameters:** None
 
-**Exemple:**
+**Example:**
 ```
 jdwp_resume()
 ```
 
-**Retourne:**
+**Returns:**
 ```
 All threads resumed
 ```
 
-**Note:** Resume tous les threads, équivalent à F8/Resume dans IntelliJ.
+**Note:** Resumes all threads, equivalent to F8/Resume in IntelliJ.
 
 
 ### 12. `jdwp_step_over`
-Exécuter la ligne courante et s'arrêter à la ligne suivante (Step Over, équivalent F6).
+Execute the current line and stop at the next line (Step Over, equivalent to F6).
 
-**Paramètres:**
-- `threadId` (long) : ID du thread (doit être suspendu)
+**Parameters:**
+- `threadId` (long) : Thread ID (must be suspended)
 
-**Exemple:**
+**Example:**
 ```
 jdwp_step_over(threadId=25)
 ```
 
-**Retourne:**
+**Returns:**
 ```
 Step over executed on thread 25 (http-nio-8080-exec-10)
 ```
 
-**Note:** Le thread doit être suspendu. Crée une StepRequest et resume le thread.
+**Note:** The thread must be suspended. Creates a StepRequest and resumes the thread.
 
 ### 13. `jdwp_step_into`
-Entrer dans les appels de méthode (Step Into, équivalent F7).
+Enter method calls (Step Into, equivalent to F7).
 
-**Paramètres:**
-- `threadId` (long) : ID du thread (doit être suspendu)
+**Parameters:**
+- `threadId` (long) : Thread ID (must be suspended)
 
-**Exemple:**
+**Example:**
 ```
 jdwp_step_into(threadId=25)
 ```
 
-**Retourne:**
+**Returns:**
 ```
 Step into executed on thread 25 (http-nio-8080-exec-10)
 ```
 
 ### 14. `jdwp_step_out`
-Sortir de la méthode courante (Step Out, équivalent Shift+F8).
+Exit the current method (Step Out, equivalent to Shift+F8).
 
-**Paramètres:**
-- `threadId` (long) : ID du thread (doit être suspendu)
+**Parameters:**
+- `threadId` (long) : Thread ID (must be suspended)
 
-**Exemple:**
+**Example:**
 ```
 jdwp_step_out(threadId=25)
 ```
 
-**Retourne:**
+**Returns:**
 ```
 Step out executed on thread 25 (http-nio-8080-exec-10)
 ```
 
 ### 15. `jdwp_set_breakpoint`
-Placer un breakpoint à une ligne spécifique dans une classe.
+Set a breakpoint at a specific line in a class.
 
-**Paramètres:**
-- `className` (String) : Nom complet de la classe (ex: "com.axelor.apps.vpauto.repository.DMSFileRepositoryVPAuto")
-- `lineNumber` (int) : Numéro de ligne
+**Parameters:**
+- `className` (String) : Fully qualified class name (e.g.: "com.axelor.apps.vpauto.repository.DMSFileRepositoryVPAuto")
+- `lineNumber` (int) : Line number
 
-**Exemple:**
+**Example:**
 ```
 jdwp_set_breakpoint(
   className="com.axelor.apps.vpauto.repository.DMSFileRepositoryVPAuto",
@@ -405,21 +393,21 @@ jdwp_set_breakpoint(
 )
 ```
 
-**Retourne:**
+**Returns:**
 ```
 Breakpoint set at com.axelor.apps.vpauto.repository.DMSFileRepositoryVPAuto:82
 ```
 
-**Note:** La classe doit être chargée et compilée avec les informations de debug (-g).
+**Note:** The class must be loaded and compiled with debug information (-g).
 
 ### 16. `jdwp_clear_breakpoint`
-Retirer un breakpoint d'une ligne spécifique.
+Remove a breakpoint from a specific line.
 
-**Paramètres:**
-- `className` (String) : Nom complet de la classe
-- `lineNumber` (int) : Numéro de ligne
+**Parameters:**
+- `className` (String) : Fully qualified class name
+- `lineNumber` (int) : Line number
 
-**Exemple:**
+**Example:**
 ```
 jdwp_clear_breakpoint(
   className="com.axelor.apps.vpauto.repository.DMSFileRepositoryVPAuto",
@@ -427,22 +415,22 @@ jdwp_clear_breakpoint(
 )
 ```
 
-**Retourne:**
+**Returns:**
 ```
 Removed 1 breakpoint(s) at com.axelor.apps.vpauto.repository.DMSFileRepositoryVPAuto:82
 ```
 
 ### 17. `jdwp_list_breakpoints`
-Lister tous les breakpoints actifs.
+List all active breakpoints.
 
-**Paramètres:** Aucun
+**Parameters:** None
 
-**Exemple:**
+**Example:**
 ```
 jdwp_list_breakpoints()
 ```
 
-**Retourne:**
+**Returns:**
 ```
 Active breakpoints: 2
 
@@ -460,18 +448,18 @@ Breakpoint 2:
 ```
 
 ### 18. `jdwp_get_events`
-Obtenir les événements JDWP récents (breakpoints, steps, exceptions, etc.).
+Get recent JDWP events (breakpoints, steps, exceptions, etc.).
 
-**Paramètres:**
-- `count` (Integer, optionnel) : Nombre d'événements à récupérer (défaut: tous)
+**Parameters:**
+- `count` (Integer, optional) : Number of events to retrieve (default: all)
 
-**Exemple:**
+**Example:**
 ```
-jdwp_get_events()           # Tous les événements
-jdwp_get_events(count=10)   # Les 10 derniers
+jdwp_get_events()           # All events
+jdwp_get_events(count=10)   # The last 10
 ```
 
-**Retourne:**
+**Returns:**
 ```
 Recent JDWP events (10):
 
@@ -480,56 +468,56 @@ Recent JDWP events (10):
 [21:45:20] BREAKPOINT: Thread 23 at com.axelor.meta.MetaFiles.attach:597
 ```
 
-**Note:** L'event listener tourne en arrière-plan et capture **TOUS** les événements JDWP, y compris ceux déclenchés par IntelliJ ou d'autres debuggers connectés via debuggerX.
+**Note:** The event listener runs in the background and captures **ALL** JDWP events.
 
-**Types d'événements capturés:**
-- `BREAKPOINT` : Thread arrêté à un breakpoint
-- `STEP` : Step over/into/out complété
-- `EXCEPTION` : Exception levée
-- `THREAD_START/DEATH` : Création/destruction de thread
-- `CLASS_PREPARE` : Classe chargée
-- `METHOD_ENTRY/EXIT` : Entrée/sortie de méthode (si configuré)
+**Captured event types:**
+- `BREAKPOINT` : Thread stopped at a breakpoint
+- `STEP` : Step over/into/out completed
+- `EXCEPTION` : Exception thrown
+- `THREAD_START/DEATH` : Thread creation/destruction
+- `CLASS_PREPARE` : Class loaded
+- `METHOD_ENTRY/EXIT` : Method entry/exit (if configured)
 
 ### 19. `jdwp_clear_events`
-Vider l'historique des événements JDWP.
+Clear the JDWP event history.
 
-**Paramètres:** Aucun
+**Parameters:** None
 
-**Exemple:**
+**Example:**
 ```
 jdwp_clear_events()
 ```
 
-**Retourne:**
+**Returns:**
 ```
 Event history cleared
 ```
 
-**Note:** Utile pour nettoyer l'historique après une session de debug ou pour se concentrer sur de nouveaux événements.
+**Note:** Useful for clearing the history after a debug session or to focus on new events.
 
 ### 20. `jdwp_get_current_thread`
-Obtenir le thread ID du breakpoint actuel depuis le proxy.
+Get the thread ID of the last breakpoint hit.
 
-**Paramètres:** Aucun
+**Parameters:** None
 
-**Exemple:**
+**Example:**
 ```
 jdwp_get_current_thread()
 ```
 
-**Retourne:**
+**Returns:**
 ```
-Current thread: http-nio-8080-exec-6 (ID=26456, suspended=true, frames=93)
+Current thread: http-nio-8080-exec-6 (ID=26456, suspended=true, frames=93, breakpoint=1)
 ```
 
-**Note:** Utilise l'API HTTP du proxy debuggerX pour récupérer automatiquement le thread du dernier breakpoint hit. Très utile avant d'appeler `jdwp_inspect_stack()`.
+**Note:** Uses the JDI event listener to automatically track the thread of the last breakpoint hit.
 
 ### 22. `jdwp_get_exception_config`
-Obtenir la configuration actuelle de monitoring des exceptions.
+Get the current exception monitoring configuration.
 
-**Paramètres:** Aucun
+**Parameters:** None
 
-**Retourne:**
+**Returns:**
 ```
 Exception monitoring configuration:
 - Capture caught exceptions: true
@@ -538,21 +526,19 @@ Exception monitoring configuration:
 ```
 
 ### 23. `jdwp_clear_all_breakpoints`
-Supprimer TOUS les breakpoints de TOUS les clients (IntelliJ, MCP, etc.).
+Remove all breakpoints set by this MCP server.
 
-**Paramètres:** Aucun
-
-**Avertissement:** Cette commande supprime également les breakpoints IntelliJ!
+**Parameters:** None
 
 ### 24. `jdwp_attach_watcher`
-Attacher un watcher à un breakpoint pour évaluer une expression Java.
+Attach a watcher to a breakpoint to evaluate a Java expression.
 
-**Paramètres:**
-- `breakpointId` (int) : ID du breakpoint (depuis `jdwp_list_breakpoints`)
-- `label` (String) : Description du watcher
-- `expression` (String) : Expression Java à évaluer (ex: `request.getData()`)
+**Parameters:**
+- `breakpointId` (int) : Breakpoint ID (from `jdwp_list_breakpoints`)
+- `label` (String) : Watcher description
+- `expression` (String) : Java expression to evaluate (e.g.: `request.getData()`)
 
-**Exemple:**
+**Example:**
 ```
 jdwp_attach_watcher(
   breakpointId=27,
@@ -561,7 +547,7 @@ jdwp_attach_watcher(
 )
 ```
 
-**Retourne:**
+**Returns:**
 ```
 ✓ Watcher attached successfully
 
@@ -572,14 +558,14 @@ jdwp_attach_watcher(
 ```
 
 ### 25. `jdwp_evaluate_watchers`
-Évaluer les expressions des watchers attachés à un breakpoint.
+Evaluate the expressions of watchers attached to a breakpoint.
 
-**Paramètres:**
-- `threadId` (long) : ID du thread suspendu
-- `scope` (String) : `"current_frame"` ou `"full_stack"`
-- `breakpointId` (Integer, optionnel) : ID du breakpoint pour optimisation
+**Parameters:**
+- `threadId` (long) : Suspended thread ID
+- `scope` (String) : `"current_frame"` or `"full_stack"`
+- `breakpointId` (Integer, optional) : Breakpoint ID for optimization
 
-**Exemple:**
+**Example:**
 ```
 jdwp_evaluate_watchers(
   threadId=26162,
@@ -588,7 +574,7 @@ jdwp_evaluate_watchers(
 )
 ```
 
-**Retourne:**
+**Returns:**
 ```
 === Watcher Evaluation for Thread 26162 ===
 
@@ -603,36 +589,36 @@ jdwp_evaluate_watchers(
 Total: Evaluated 2 expression(s)
 ```
 
-**Format des résultats:**
-- **Strings**: `"valeur"`
+**Result format:**
+- **Strings**: `"value"`
 - **Primitives**: `42`, `true`
 - **Objects**: `Object#ID (type)`
 
-**Documentation complète**: Voir [EXPRESSION_EVALUATION.md](EXPRESSION_EVALUATION.md)
+**Full documentation**: See [EXPRESSION_EVALUATION.md](EXPRESSION_EVALUATION.md)
 
 ### 26. `jdwp_detach_watcher`
-Détacher un watcher d'un breakpoint.
+Detach a watcher from a breakpoint.
 
-**Paramètres:**
-- `watcherId` (String) : UUID du watcher (retourné par `jdwp_attach_watcher`)
+**Parameters:**
+- `watcherId` (String) : Watcher UUID (returned by `jdwp_attach_watcher`)
 
-**Exemple:**
+**Example:**
 ```
 jdwp_detach_watcher(watcherId="47e8090c-dc4a-4b03-a93a-068cd1b1e1ec")
 ```
 
 ### 27. `jdwp_list_watchers_for_breakpoint`
-Lister tous les watchers attachés à un breakpoint spécifique.
+List all watchers attached to a specific breakpoint.
 
-**Paramètres:**
-- `breakpointId` (int) : ID du breakpoint
+**Parameters:**
+- `breakpointId` (int) : Breakpoint ID
 
 ### 28. `jdwp_list_all_watchers`
-Lister tous les watchers actifs sur tous les breakpoints.
+List all active watchers on all breakpoints.
 
-**Paramètres:** Aucun
+**Parameters:** None
 
-**Retourne:**
+**Returns:**
 ```
 Active watchers: 3
 
@@ -649,218 +635,203 @@ Breakpoint 29 (AuctionService:45) - 1 watcher(s):
 ```
 
 ### 29. `jdwp_clear_all_watchers`
-Supprimer tous les watchers de tous les breakpoints.
+Remove all watchers from all breakpoints.
 
-**Paramètres:** Aucun
+**Parameters:** None
 
 ### 30. `jdwp_inspect_stack` 🚀
-_(Déjà documenté ci-dessus comme outil #21)_
+_(Already documented above as tool #21)_
 
-## Workflow typique
+## Typical workflow
 
-### Scénario 1: Debug d'une requête REST
-
-```
-1. Dans IntelliJ: Mettre un breakpoint dans RestService.find()
-
-2. Dans le navigateur/Postman: Déclencher la requête
-
-3. Dans Claude Code:
-   "J'ai un breakpoint actif, peux-tu analyser la requête?"
-
-4. Claude utilise automatiquement:
-   - jdwp_connect() → connexion automatique avec config .mcp.json
-   - jdwp_get_threads() → trouve thread 15 suspendu
-   - jdwp_get_stack(15) → voit la stack complète
-   - jdwp_get_locals(15, 0) → trouve request = Object#26886
-   - jdwp_get_fields(26886) → voit request.data, request.limit, etc.
-   - jdwp_get_fields(26936) → descend dans le LinkedHashMap
-
-   "Le problème est que request.model est null alors que..."
-```
-
-### Scénario 2: Monitoring des breakpoints IntelliJ
+### Scenario 1: Debugging a REST request
 
 ```
-1. Dans IntelliJ: Placer un breakpoint
-2. Dans le navigateur: Déclencher une requête
-3. IntelliJ s'arrête au breakpoint
+1. In IntelliJ: Set a breakpoint in RestService.find()
 
-4. Dans Claude Code:
-   "Est-ce que tu as détecté le breakpoint?"
+2. In the browser/Postman: Trigger the request
 
-5. Claude utilise:
-   - jdwp_get_events(count=5) → voit les derniers événements
+3. In Claude Code:
+   "I have an active breakpoint, can you analyze the request?"
+
+4. Claude automatically uses:
+   - jdwp_connect() → automatic connection with .mcp.json config
+   - jdwp_get_threads() → finds thread 15 suspended
+   - jdwp_get_stack(15) → views the full stack
+   - jdwp_get_locals(15, 0) → finds request = Object#26886
+   - jdwp_get_fields(26886) → views request.data, request.limit, etc.
+   - jdwp_get_fields(26936) → navigates into the LinkedHashMap
+
+   "The problem is that request.model is null while..."
+```
+
+### Scenario 2: Monitoring IntelliJ breakpoints
+
+```
+1. In IntelliJ: Set a breakpoint
+2. In the browser: Trigger a request
+3. IntelliJ stops at the breakpoint
+
+4. In Claude Code:
+   "Did you detect the breakpoint?"
+
+5. Claude uses:
+   - jdwp_get_events(count=5) → views the latest events
 
    "[21:45:32] BREAKPOINT: Thread 25 at DMSFileRepositoryVPAuto.save:74"
 
-   - jdwp_get_stack(25) → analyse la stack du thread arrêté
-   - jdwp_get_locals(25, 0) → inspecte les variables
+   - jdwp_get_stack(25) → analyzes the stack of the stopped thread
+   - jdwp_get_locals(25, 0) → inspects the variables
 
-   "Oui, le thread 25 est arrêté à DMSFileRepositoryVPAuto.save:74
-    Je vois que la variable 'key' contient..."
+   "Yes, thread 25 is stopped at DMSFileRepositoryVPAuto.save:74
+    I see that the variable 'key' contains..."
 ```
 
-**Note:** L'event listener permet à Claude Code de "voir" ce qui se passe dans IntelliJ, créant une expérience de debug collaborative entre l'IDE et l'IA.
+**Note:** The event listener allows Claude Code to "see" what is happening in IntelliJ, creating a collaborative debugging experience between the IDE and the AI.
 
-## Structure du projet
+## Project structure
 
 ```
 mcp-jdwp-java/
-├── build.gradle                    # Configuration Gradle
-├── settings.gradle                 # Modules Gradle
-├── gradle.properties               # Propriétés Gradle
-├── gradlew.bat                     # Gradle wrapper (Windows)
+├── pom.xml                         # Maven configuration
+├── mvnw / mvnw.cmd                 # Maven wrapper
 ├── .gitignore
-├── README.md                       # Documentation principale
-├── WORKFLOW.md                     # Guide de développement et debugging
-├── EXPRESSION_EVALUATION.md        # Documentation des watchers et évaluation
-├── check-status.bat                # Script de diagnostic
-│
-├── lib/
-│   ├── debuggerX.jar              # Proxy JDWP multi-debugger
-│   └── debuggerX-README.md        # Documentation du proxy
+├── README.md                       # Main documentation
+├── WORKFLOW.md                     # Development and debugging guide
+├── EXPRESSION_EVALUATION.md        # Watchers and evaluation documentation
 │
 ├── src/main/
 │   ├── java/io/mcp/jdwp/
 │   │   ├── JDWPMcpServerApplication.java  # Main Spring Boot
-│   │   ├── JDWPTools.java                 # 21 outils MCP exposés
-│   │   ├── JDIConnectionService.java      # Connexion JDWP persistante
-│   │   ├── DebuggerXManager.java          # Gestion automatique du proxy
+│   │   ├── JDWPTools.java                 # Exposed MCP tools
+│   │   ├── JDIConnectionService.java      # Persistent JDWP connection
+│   │   ├── BreakpointTracker.java         # Breakpoint and current thread tracking
+│   │   ├── JdiEventListener.java          # JDI event listener
 │   │   │
 │   │   ├── watchers/
-│   │   │   ├── WatcherManager.java        # Gestion des watchers
-│   │   │   └── Watcher.java               # Modèle de watcher
+│   │   │   ├── WatcherManager.java        # Watcher management
+│   │   │   └── Watcher.java               # Watcher model
 │   │   │
 │   │   └── evaluation/
-│   │       ├── JdiExpressionEvaluator.java    # Évaluation d'expressions Java
-│   │       ├── RemoteCodeExecutor.java        # Exécution dans la JVM cible
-│   │       ├── InMemoryJavaCompiler.java      # Compilation dynamique (ECJ)
-│   │       ├── ClasspathDiscoverer.java       # Découverte du classpath
-│   │       ├── JdkDiscoveryService.java       # Détection JDK local compatible
+│   │       ├── JdiExpressionEvaluator.java    # Java expression evaluation
+│   │       ├── RemoteCodeExecutor.java        # Execution in the target JVM
+│   │       ├── InMemoryJavaCompiler.java      # Dynamic compilation (ECJ)
+│   │       ├── ClasspathDiscoverer.java       # Classpath discovery
+│   │       ├── JdkDiscoveryService.java       # Compatible local JDK detection
 │   │       └── exceptions/
 │   │           └── JdiEvaluationException.java
 │   │
 │   └── resources/
-│       ├── application.properties      # Config Spring Boot
-│       └── logback-spring.xml         # Configuration des logs
+│       ├── application.properties      # Spring Boot config
+│       └── logback-spring.xml         # Log configuration
 │
 └── build/
     └── libs/
-        └── mcp-jdwp-java-1.0.0.jar    # JAR final (23 MB)
+        └── mcp-jdwp-java-1.0.0.jar    # Final JAR (23 MB)
 ```
 
-## Dépendances
+## Dependencies
 
 - **Spring Boot 3.4.1** - Framework
-- **Spring AI MCP 1.1.0-M3** - Intégration MCP
+- **Spring AI MCP 1.1.0-M3** - MCP integration
 - **MCP Annotations 0.1.0** - @McpTool
-- **JDI** (com.sun.jdi depuis tools.jar) - Interface de debug Java
-- **Eclipse JDT Compiler (ECJ) 3.33.0** - Compilation dynamique d'expressions
-- **Lombok** - Annotations (@Slf4j pour logging)
-- **Jackson** - Parsing JSON pour API debuggerX
+- **JDI** (com.sun.jdi from tools.jar) - Java debug interface
+- **Eclipse JDT Compiler (ECJ) 3.33.0** - Dynamic expression compilation
+- **Lombok** - Annotations (@Slf4j for logging)
 
-## Avantages
+## Advantages
 
-✅ **vs implémentation Python:**
-- Pas de parsing JDWP manuel
-- API stable et documentée (JDI)
-- Typage fort, moins d'erreurs
-- Performance native Java
+✅ **vs Python implementation:**
+- No manual JDWP parsing
+- Stable and documented API (JDI)
+- Strong typing, fewer errors
+- Native Java performance
 
-✅ **vs debugger classique:**
-- Inspection automatisée par IA
-- Navigation intelligente dans les objets
-- Analyse contextuelle des problèmes
-- Pas besoin de naviguer manuellement
+✅ **vs traditional debugger:**
+- AI-automated inspection
+- Smart object navigation
+- Contextual problem analysis
+- No need to navigate manually
 
 ## Troubleshooting
 
 ### "tools.jar not found"
-Vérifiez que `JAVA_HOME` pointe vers un **JDK** (pas un JRE).
+Verify that `JAVA_HOME` points to a **JDK** (not a JRE).
 
 ### "SocketAttach connector not found"
-JDI n'est pas disponible. Utilisez un JDK avec tools.jar.
+JDI is not available. Use a JDK with tools.jar.
 
 ### Connection refused
-- Vérifiez que Tomcat tourne avec `-agentlib:jdwp=...address=*:61959`
-- Vérifiez les ports dans `.mcp.json` (`JVM_JDWP_PORT=61959`, `DEBUGGERX_PROXY_PORT=55005`)
-- debuggerX se lance automatiquement lors de la connexion
+- Verify that Tomcat is running with `-agentlib:jdwp=...address=*:5005`
+- Check the port in `.mcp.json` (`JVM_JDWP_PORT=5005`)
 
-### Le serveur MCP ne répond pas dans Claude Code
-- Rebuild: `./gradlew.bat build`
-- Vérifiez le chemin dans `.mcp.json`
-- Redémarrez Claude Code
+### The MCP server does not respond in Claude Code
+- Rebuild: `mvn clean package -DskipTests`
+- Check the path in `.mcp.json`
+- Restart Claude Code
 
 ### "Thread is not suspended"
-Un thread doit être arrêté à un breakpoint pour:
+A thread must be stopped at a breakpoint for:
 - `jdwp_get_stack`
 - `jdwp_get_locals`
 - `jdwp_invoke_method`
 
-## Configuration personnalisée
+## Custom configuration
 
-### Changer les ports
+### Changing the ports
 
-**1. Modifier `.mcp.json`:**
+**1. Modify `.mcp.json`:**
 ```json
 {
   "mcpServers": {
     "jdwp-inspector": {
       "command": "java",
       "args": [
-        "-DHOME=C:/Users/nicolasv/MCP_servers/mcp-jdwp-java",
-        "-DJVM_JDWP_PORT=12345",          // Port JVM personnalisé
-        "-DDEBUGGERX_PROXY_PORT=54321",   // Port proxy personnalisé
+        "--add-modules", "jdk.jdi",
+        "-DJVM_JDWP_PORT=12345",
         "-jar",
-        "C:/Users/nicolasv/MCP_servers/mcp-jdwp-java/build/libs/mcp-jdwp-java-1.0.0.jar"
+        "C:/Users/nicolasv/MCP_servers/mcp-jdwp-java/target/mcp-jdwp-java-1.0.0.jar"
       ]
     }
   }
 }
 ```
 
-**2. Modifier les VM Options de l'application:**
+**2. Modify the application's VM Options:**
 ```
 -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:12345
 ```
 
-**3. Redémarrer Claude Code pour recharger la configuration**
-
-**4. Connecter les debuggers:**
-- **IntelliJ**: Remote Debug sur `localhost:54321`
-- **MCP Inspector**: Utilise automatiquement `jdwp_connect()` (lit la config)
-
-Voir [lib/debuggerX-README.md](lib/debuggerX-README.md) pour plus de détails.
+**3. Restart Claude Code to reload the configuration**
 
 ## Version
 
-**1.2.0** - Version complète avec évaluation d'expressions Java
-- **30 outils MCP** (8 inspection + 9 contrôle + 4 événements + 9 watchers)
-- **Évaluation d'expressions (NEW):**
-  - Compilation dynamique d'expressions Java au breakpoint
-  - Découverte automatique du classpath (571 entrées)
-  - Découverte automatique du JDK local
-  - Support des proxies dynamiques (Guice, CGLIB)
-  - Cache de compilation pour performance
-  - 9 outils watchers (attach/evaluate/detach/list/clear)
-- **Surveillance d'événements:**
-  - Event listener en arrière-plan
-  - Capture TOUS les événements JDWP (même depuis IntelliJ)
-  - Historique des 100 derniers événements
+**1.2.0** - Complete version with Java expression evaluation
+- **30 MCP tools** (8 inspection + 9 control + 4 events + 9 watchers)
+- **Expression evaluation (NEW):**
+  - Dynamic compilation of Java expressions at breakpoints
+  - Automatic classpath discovery (571 entries)
+  - Automatic local JDK discovery
+  - Dynamic proxy support (Guice, CGLIB)
+  - Compilation cache for performance
+  - 9 watcher tools (attach/evaluate/detach/list/clear)
+- **Event monitoring:**
+  - Background event listener
+  - Captures ALL JDWP events (even from IntelliJ)
+  - History of the last 100 events
   - Types: Breakpoints, Steps, Exceptions, Threads, etc.
-- **Contrôle d'exécution:**
+- **Execution control:**
   - Resume/Suspend threads
   - Step Over/Into/Out
   - Set/Clear/List breakpoints
 - **Inspection:**
-  - Navigation récursive illimitée (Remote Inspector Pattern ~50x plus rapide)
-  - Collections intelligentes
-  - Invocation de méthodes
-- Cache singleton persistant
-- Lancement automatique de debuggerX
-- Ports configurables via `.mcp.json`
-- Connexion sans arguments (lit la config automatiquement)
+  - Unlimited recursive navigation (Remote Inspector Pattern ~50x faster)
+  - Smart collections
+  - Method invocation
+- Persistent singleton cache
+- Configurable port via `.mcp.json`
+- Direct connection to the JVM (without proxy)
+- JDI event listener for breakpoint tracking
 
 ## License
 
