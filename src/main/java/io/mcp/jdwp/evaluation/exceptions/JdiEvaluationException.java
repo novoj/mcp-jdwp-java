@@ -5,11 +5,11 @@ package io.mcp.jdwp.evaluation.exceptions;
  */
 public class JdiEvaluationException extends Exception {
 
-    public JdiEvaluationException(String message) {
-        super(message);
-    }
+	public JdiEvaluationException(String message) {
+		super(message);
+	}
 
-    public JdiEvaluationException(String message, Throwable cause) {
-        super(message, cause);
-    }
+	public JdiEvaluationException(String message, Throwable cause) {
+		super(message, cause);
+	}
 }
