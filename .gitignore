@@ -14,8 +14,9 @@ pom.xml.versionsBackup
 .DS_Store
 Thumbs.db
 
-# Claude Code local settings (per-user)
-.claude/
+# Claude Code per-user settings (but keep shared content like skills)
+.claude/*
+!.claude/skills/
 
 # Runtime logs
 mcp-jdwp-inspector.log
