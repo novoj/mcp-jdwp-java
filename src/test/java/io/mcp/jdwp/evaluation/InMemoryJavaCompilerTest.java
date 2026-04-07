@@ -60,7 +60,7 @@ class InMemoryJavaCompilerTest {
 		@Test
 		void shouldCompileSimpleClass() throws JdiEvaluationException {
 			String jdkHome = System.getProperty("java.home");
-			compiler.configure(jdkHome, "");
+			compiler.configure(jdkHome, "", 17);
 
 			String source = "public class SimpleTest { public static String run() { return \"hello\"; } }";
 			Map<String, byte[]> result = compiler.compile("SimpleTest", source);
@@ -79,7 +79,7 @@ class InMemoryJavaCompilerTest {
 		@Test
 		void shouldReportCompilationErrors() {
 			String jdkHome = System.getProperty("java.home");
-			compiler.configure(jdkHome, "");
+			compiler.configure(jdkHome, "", 17);
 
 			String badSource = "public class BadClass { public void x() { undeclaredMethod(); } }";
 

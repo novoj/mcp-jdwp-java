@@ -26,18 +26,20 @@ public class InMemoryJavaCompiler {
 
 	private String jdkPath;
 	private String classpath;
+	private int targetMajorVersion = 8;
 
 	/**
-	 * Configures the compiler with the target JVM's JDK path and classpath.
-	 * This must be called before compiling expressions.
+	 * Configures the compiler with the target JVM's JDK path, classpath, and target version.
 	 *
-	 * @param jdkPath   The file path to the root of the target JDK.
-	 * @param classpath Classpath string from target JVM (colon or semicolon separated).
+	 * @param jdkPath            The file path to the root of the target JDK.
+	 * @param classpath          Classpath string from target JVM (colon or semicolon separated).
+	 * @param targetMajorVersion Target JVM major version (e.g., 8, 11, 17, 21).
 	 */
-	public synchronized void configure(String jdkPath, String classpath) {
+	public synchronized void configure(String jdkPath, String classpath, int targetMajorVersion) {
 		long startTime = System.currentTimeMillis();
 		this.jdkPath = jdkPath;
 		this.classpath = classpath;
+		this.targetMajorVersion = targetMajorVersion > 0 ? targetMajorVersion : 8;
 
 		if (classpath == null || classpath.isEmpty()) {
 			log.warn("[Compiler] Classpath is empty, application classes may not be resolved.");
@@ -91,8 +93,8 @@ public class InMemoryJavaCompiler {
 
 			// 4. Build compiler options
 			List<String> options = new ArrayList<>();
-			// TODO: derive -source/-target from the target JVM version instead of hardcoding 1.8
-			options.addAll(Arrays.asList("-source", "1.8", "-target", "1.8"));
+			String versionStr = targetMajorVersion <= 8 ? "1." + targetMajorVersion : String.valueOf(targetMajorVersion);
+			options.addAll(Arrays.asList("-source", versionStr, "-target", versionStr));
 			options.add("-g"); // Preserve local variable names
 			options.addAll(Arrays.asList("--system", this.jdkPath));
 			if (this.classpath != null && !this.classpath.isEmpty()) {

@@ -18,9 +18,14 @@ import java.util.stream.Stream;
 public class JdkDiscoveryService {
 
 	private final VirtualMachine vm;
+	private int targetMajorVersion;
 
 	public JdkDiscoveryService(VirtualMachine vm) {
 		this.vm = vm;
+	}
+
+	public int getTargetMajorVersion() {
+		return targetMajorVersion;
 	}
 
 	/**
@@ -40,6 +45,7 @@ public class JdkDiscoveryService {
 
 			// 2. Extract major version (e.g., "11" from "11.0.21")
 			int targetMajorVersion = extractMajorVersion(targetVersion);
+			this.targetMajorVersion = targetMajorVersion;
 
 			log.info("[JDK Discovery] Looking for Java {} JDK on MCP server...", targetMajorVersion);
 

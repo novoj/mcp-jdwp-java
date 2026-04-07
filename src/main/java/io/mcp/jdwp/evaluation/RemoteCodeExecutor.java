@@ -88,6 +88,14 @@ public class RemoteCodeExecutor {
 
 	private ClassType loadClass(VirtualMachine vm, ThreadReference thread, ClassLoaderReference classLoader,
 								String className, byte[] bytecode) throws JdiEvaluationException {
+		// Cached compilations reuse the same class name across calls — if the class
+		// is already loaded in the target VM, skip defineClass to avoid LinkageError.
+		List<ReferenceType> existing = vm.classesByName(className);
+		if (!existing.isEmpty() && existing.get(0) instanceof ClassType existingClass) {
+			log.debug("[Executor] Class {} already loaded — reusing", className);
+			return existingClass;
+		}
+
 		try {
 			log.debug("[Executor] Loading class {} ({} bytes) using classloader {}",
 				className, bytecode.length, classLoader.referenceType().name());

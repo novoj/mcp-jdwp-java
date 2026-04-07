@@ -8,8 +8,8 @@ import org.springframework.stereotype.Service;
 import io.mcp.jdwp.evaluation.ClasspathDiscoverer;
 import io.mcp.jdwp.evaluation.ClasspathDiscoverer.DiscoveryResult;
 import io.mcp.jdwp.evaluation.JdkDiscoveryService.JdkNotFoundException;
+import io.mcp.jdwp.watchers.WatcherManager;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -26,6 +26,8 @@ public class JDIConnectionService {
 
 	private final JdiEventListener eventListener;
 	private final BreakpointTracker breakpointTracker;
+	private final EventHistory eventHistory;
+	private final WatcherManager watcherManager;
 
 	private VirtualMachine vm = null;
 	private String lastHost = null;
@@ -34,9 +36,12 @@ public class JDIConnectionService {
 	// Cache to store encountered ObjectReferences
 	private final Map<Long, ObjectReference> objectCache = new ConcurrentHashMap<>();
 
-	public JDIConnectionService(JdiEventListener eventListener, BreakpointTracker breakpointTracker) {
+	public JDIConnectionService(JdiEventListener eventListener, BreakpointTracker breakpointTracker,
+								EventHistory eventHistory, WatcherManager watcherManager) {
 		this.eventListener = eventListener;
 		this.breakpointTracker = breakpointTracker;
+		this.eventHistory = eventHistory;
+		this.watcherManager = watcherManager;
 	}
 
 	// Cached classpath from target JVM (discovered once)
@@ -44,6 +49,7 @@ public class JDIConnectionService {
 
 	// Discovered local JDK path matching target JVM version
 	private volatile String discoveredJdkPath = null;
+	private volatile int targetMajorVersion = 0;
 
 	/**
 	 * Check if VM connection is alive
@@ -76,8 +82,12 @@ public class JDIConnectionService {
 			return "Already connected to " + vm.name();
 		}
 
-		// Clean up dead connection if any
-		vm = null;
+		// Stale state from a dead VM (or first connection): wipe everything before reconnecting.
+		// This is what prevents memory leaks across many test-run sessions.
+		if (vm != null) {
+			log.info("[JDI] Clearing stale state from previous (dead) VM connection");
+			cleanupSessionState();
+		}
 
 		// Find SocketAttachingConnector
 		VirtualMachineManager vmm = Bootstrap.virtualMachineManager();
@@ -133,25 +143,48 @@ public class JDIConnectionService {
 		if (vm == null) {
 			return "Not connected";
 		}
+		cleanupSessionState();
+		return "Disconnected";
+	}
 
+	/**
+	 * Releases all session-bound state held by the MCP server: JDI event requests, object cache,
+	 * watchers, classpath cache, event history, and the VM reference itself. Best-effort —
+	 * tolerates a dead VM (uses {@code reset()} as a fallback when JDI calls would fail).
+	 *
+	 * <p>Called from both {@link #disconnect()} (clean shutdown) and {@link #connect(String, int)}
+	 * when a stale connection is detected (target VM died but the user reconnects). Without this,
+	 * the MCP server would accumulate breakpoints, watchers, and ObjectReferences across sessions.
+	 */
+	private void cleanupSessionState() {
 		eventListener.stop();
-		// Delete JDI event requests before disposing VM, then clear tracker state
-		try {
-			breakpointTracker.clearAll(vm.eventRequestManager());
-		} catch (Exception e) {
-			// VM may already be disconnected — fall back to just clearing local state
+
+		if (vm != null) {
+			try {
+				breakpointTracker.clearAll(vm.eventRequestManager());
+			} catch (Exception e) {
+				// VM may already be dead — fall back to in-memory reset
+				breakpointTracker.reset();
+			}
+		} else {
 			breakpointTracker.reset();
 		}
+
+		watcherManager.clearAll();
 		objectCache.clear();
 		cachedClasspath = null;
 		discoveredJdkPath = null;
-		try {
-			vm.dispose();
-		} catch (Exception e) {
-			// VM may already be disconnected
+		targetMajorVersion = 0;
+		eventHistory.clear();
+
+		if (vm != null) {
+			try {
+				vm.dispose();
+			} catch (Exception e) {
+				// VM may already be disconnected
+			}
+			vm = null;
 		}
-		vm = null;
-		return "Disconnected";
 	}
 
 	/**
@@ -162,6 +195,23 @@ public class JDIConnectionService {
 	 */
 	public synchronized VirtualMachine getVM() throws Exception {
 		ensureConnected();
+		// Opportunistically retry pending breakpoints — handles bootstrap classes that don't fire
+		// ClassPrepareEvent and any other deferred items whose target class became visible since
+		// the last check. Best-effort; failures are swallowed.
+		try {
+			breakpointTracker.tryPromotePending(this, null);
+		} catch (Exception e) {
+			log.debug("[JDI] Pending promotion failed: {}", e.getMessage());
+		}
+		return vm;
+	}
+
+	/**
+	 * Returns the raw VM reference without triggering opportunistic promotion. Used by
+	 * {@link BreakpointTracker#tryPromotePending(JDIConnectionService, ThreadReference)} to avoid
+	 * recursion. Callers must already hold the connection service monitor.
+	 */
+	VirtualMachine getRawVM() {
 		return vm;
 	}
 
@@ -453,34 +503,6 @@ public class JDIConnectionService {
 	}
 
 	/**
-	 * TODO: Implement event history tracking
-	 */
-	public List<String> getRecentEvents(int count) {
-		return new ArrayList<>();
-	}
-
-	/**
-	 * TODO: Implement event history clearing
-	 */
-	public void clearEvents() {
-		// Stub implementation
-	}
-
-	/**
-	 * TODO: Implement exception monitoring configuration
-	 */
-	public String configureExceptionMonitoring(Boolean captureCaught, String includePackages, String excludeClasses) {
-		return "Exception monitoring not yet implemented";
-	}
-
-	/**
-	 * TODO: Implement exception config retrieval
-	 */
-	public String getExceptionConfig() {
-		return "Exception monitoring not yet implemented";
-	}
-
-	/**
 	 * Discover the full classpath of the target JVM by exploring its classloader hierarchy.
 	 * Results are cached after first call.
 	 *
@@ -517,7 +539,8 @@ public class JDIConnectionService {
 
 			// Store discovered JDK path for later use by JDT compiler
 			discoveredJdkPath = result.getLocalJdkPath();
-			log.info("[JDI] Using local JDK: {}", discoveredJdkPath);
+			targetMajorVersion = result.getTargetMajorVersion();
+			log.info("[JDI] Using local JDK: {} (Java {})", discoveredJdkPath, targetMajorVersion);
 
 			Set<String> classpathEntries = result.getApplicationClasspath();
 
@@ -557,6 +580,151 @@ public class JDIConnectionService {
 	 */
 	public String getDiscoveredJdkPath() {
 		return discoveredJdkPath;
+	}
+
+	/**
+	 * Returns the target JVM's major Java version (e.g., 8, 11, 17, 21).
+	 */
+	public int getTargetMajorVersion() {
+		return targetMajorVersion;
+	}
+
+	/**
+	 * Returns a previously cached ObjectReference, or null if not in cache.
+	 */
+	public ObjectReference getCachedObject(long objectId) {
+		return objectCache.get(objectId);
+	}
+
+	/**
+	 * Locates a class in the target VM, force-loading it via {@code Class.forName(name)} if not
+	 * yet visible. The force-load attempt requires a suspended thread (typically the main thread
+	 * paused at VMStart, or any thread suspended at a breakpoint). Returns null if the class
+	 * cannot be found or force-loaded.
+	 *
+	 * <p>This solves the bootstrap-class problem: classes like {@code java.lang.IllegalStateException}
+	 * are not visible to {@link VirtualMachine#classesByName(String)} until first referenced, and
+	 * their {@link com.sun.jdi.event.ClassPrepareEvent} is not delivered to JDI clients. Forcing
+	 * the load via {@code Class.forName} bypasses both issues.
+	 */
+	public synchronized ReferenceType findOrForceLoadClass(String className) {
+		return findOrForceLoadClass(className, null);
+	}
+
+	/**
+	 * Same as {@link #findOrForceLoadClass(String)} but allows passing a preferred thread for the
+	 * force-load step. This must be a thread that is suspended at a JDI method-invocation event
+	 * (breakpoint, step, exception, class prepare) — JDI cannot invoke methods on threads
+	 * suspended via vm.suspend() (e.g., the VMStart-suspended state).
+	 */
+	public synchronized ReferenceType findOrForceLoadClass(String className, ThreadReference preferredThread) {
+		if (vm == null) return null;
+
+		// Fast path: already visible via the indexed lookup
+		List<ReferenceType> existing = vm.classesByName(className);
+		if (!existing.isEmpty()) {
+			return existing.get(0);
+		}
+
+		// Fallback 1: full scan of allClasses() — sometimes bootstrap classes appear here
+		// even when classesByName misses them.
+		ReferenceType scanned = vm.allClasses().stream()
+			.filter(rt -> rt.name().equals(className))
+			.findFirst()
+			.orElse(null);
+		if (scanned != null) {
+			log.info("[JDI] Found '{}' via allClasses() scan (not in classesByName index)", className);
+			return scanned;
+		}
+
+		// Fallback 2: invoke Class.forName(name) in the target VM to force a load.
+		// JDI requires the thread to be suspended at a method-invocation event AND have frames.
+		ThreadReference thread = preferredThread != null && isUsableForInvoke(preferredThread)
+			? preferredThread : findSuspendedThread();
+		if (thread == null) {
+			log.debug("[JDI] Cannot force-load '{}' — no thread suspended at a method-invocation event", className);
+			return null;
+		}
+
+		try {
+			log.info("[JDI] Attempting to force-load '{}' via thread '{}' (suspended={}, frames={})",
+				className, thread.name(), thread.isSuspended(), tryFrameCount(thread));
+
+			List<ReferenceType> classClassList = vm.classesByName("java.lang.Class");
+			if (classClassList.isEmpty()) {
+				log.warn("[JDI] java.lang.Class not visible in target VM — cannot force-load");
+				return null;
+			}
+			ClassType classClass = (ClassType) classClassList.get(0);
+			Method forName = classClass.concreteMethodByName("forName", "(Ljava/lang/String;)Ljava/lang/Class;");
+			if (forName == null) {
+				log.warn("[JDI] Class.forName(String) method not found");
+				return null;
+			}
+
+			StringReference nameRef = vm.mirrorOf(className);
+			classClass.invokeMethod(thread, forName, java.util.List.of(nameRef), ClassType.INVOKE_SINGLE_THREADED);
+			log.info("[JDI] Force-loaded class '{}' via Class.forName", className);
+
+			List<ReferenceType> retry = vm.classesByName(className);
+			return retry.isEmpty() ? null : retry.get(0);
+		} catch (Exception e) {
+			log.warn("[JDI] Could not force-load class '{}': {} ({})",
+				className, e.getMessage(), e.getClass().getSimpleName());
+			return null;
+		}
+	}
+
+	private int tryFrameCount(ThreadReference thread) {
+		try {
+			return thread.frameCount();
+		} catch (Exception e) {
+			return -1;
+		}
+	}
+
+	private boolean isUsableForInvoke(ThreadReference t) {
+		try {
+			return t.isSuspended() && t.frameCount() > 0;
+		} catch (Exception e) {
+			return false;
+		}
+	}
+
+	private ThreadReference findSuspendedThread() {
+		if (vm == null) return null;
+		try {
+			// First preference: the thread that most recently hit a breakpoint — known to be
+			// suspended at a method-invocation event, which is what JDI requires for invokeMethod.
+			ThreadReference lastBp = breakpointTracker.getLastBreakpointThread();
+			if (lastBp != null && isUsableForInvoke(lastBp)) {
+				return lastBp;
+			}
+			// Fallback: any suspended thread with frames. Skip JVM-internal threads (Reference
+			// Handler, Finalizer, etc.) which are suspended in native waits, not at JDI events.
+			return vm.allThreads().stream()
+				.filter(t -> isUsableForInvoke(t) && !isJvmInternalThread(t))
+				.findFirst()
+				.orElse(null);
+		} catch (Exception e) {
+			return null;
+		}
+	}
+
+	private boolean isJvmInternalThread(ThreadReference t) {
+		try {
+			String name = t.name();
+			return name.equals("Reference Handler")
+				|| name.equals("Finalizer")
+				|| name.equals("Signal Dispatcher")
+				|| name.equals("Common-Cleaner")
+				|| name.startsWith("GC ")
+				|| name.startsWith("G1 ")
+				|| name.startsWith("Notification Thread")
+				|| name.startsWith("Service Thread");
+		} catch (Exception e) {
+			return true; // err on the side of skipping
+		}
 	}
 
 }

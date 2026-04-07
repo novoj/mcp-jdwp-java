@@ -27,17 +27,20 @@ public class JDWPTools {
 	private final BreakpointTracker breakpointTracker;
 	private final WatcherManager watcherManager;
 	private final JdiExpressionEvaluator expressionEvaluator;
+	private final EventHistory eventHistory;
 
 	private static final int JVM_JDWP_PORT = Integer.parseInt(
 		System.getProperty("JVM_JDWP_PORT", "5005")
 	);
 
 	public JDWPTools(JDIConnectionService jdiService, BreakpointTracker breakpointTracker,
-					 WatcherManager watcherManager, JdiExpressionEvaluator expressionEvaluator) {
+					 WatcherManager watcherManager, JdiExpressionEvaluator expressionEvaluator,
+					 EventHistory eventHistory) {
 		this.jdiService = jdiService;
 		this.breakpointTracker = breakpointTracker;
 		this.watcherManager = watcherManager;
 		this.expressionEvaluator = expressionEvaluator;
+		this.eventHistory = eventHistory;
 	}
 
 	@McpTool(description = "Connect to the JDWP server using configuration from .mcp.json")
@@ -191,6 +194,77 @@ public class JDWPTools {
 		}
 	}
 
+	@McpTool(description = "Invoke toString() on a cached object to get its string representation")
+	public String jdwp_to_string(
+			@McpToolParam(description = "Object unique ID (from jdwp_get_locals or jdwp_get_fields)") long objectId,
+			@McpToolParam(description = "Thread unique ID (must be suspended). If omitted, uses the last breakpoint thread.") Long threadId) {
+		try {
+			ObjectReference obj = jdiService.getCachedObject(objectId);
+			if (obj == null) {
+				return String.format("[ERROR] Object #%d not found in cache.\n" +
+					"Use jdwp_get_locals() to discover objects in the current scope.", objectId);
+			}
+
+			VirtualMachine vm = jdiService.getVM();
+			ThreadReference thread;
+			if (threadId != null) {
+				thread = findThread(vm, threadId);
+				if (thread == null) return "Error: Thread not found with ID " + threadId;
+			} else {
+				thread = breakpointTracker.getLastBreakpointThread();
+				if (thread == null) return "Error: No suspended thread available. Provide a threadId or hit a breakpoint first.";
+			}
+
+			if (!thread.isSuspended()) {
+				return "Error: Thread is not suspended.";
+			}
+
+			Method toStringMethod = obj.referenceType()
+				.methodsByName("toString", "()Ljava/lang/String;")
+				.stream().findFirst().orElse(null);
+
+			if (toStringMethod == null) {
+				return String.format("Object #%d (%s): no toString() method found", objectId, obj.referenceType().name());
+			}
+
+			Value result = obj.invokeMethod(thread, toStringMethod, java.util.Collections.emptyList(),
+				ObjectReference.INVOKE_SINGLE_THREADED);
+
+			if (result instanceof StringReference strRef) {
+				return String.format("Object #%d (%s).toString() = \"%s\"",
+					objectId, obj.referenceType().name(), strRef.value());
+			}
+			return String.format("Object #%d (%s).toString() = %s",
+				objectId, obj.referenceType().name(), formatValue(result));
+		} catch (Exception e) {
+			return "Error invoking toString(): " + e.getMessage();
+		}
+	}
+
+	@McpTool(description = "Evaluate a Java expression in the context of a suspended thread's stack frame")
+	public String jdwp_evaluate_expression(
+			@McpToolParam(description = "Thread unique ID") long threadId,
+			@McpToolParam(description = "Java expression to evaluate (e.g., 'order.getTotal()', 'x + y', 'name.length()')") String expression,
+			@McpToolParam(description = "Frame index (0 = current frame, default: 0)") Integer frameIndex) {
+		try {
+			VirtualMachine vm = jdiService.getVM();
+			ThreadReference thread = findThread(vm, threadId);
+			if (thread == null) return "Error: Thread not found with ID " + threadId;
+			if (!thread.isSuspended()) return "Error: Thread is not suspended.";
+
+			if (frameIndex == null) frameIndex = 0;
+
+			expressionEvaluator.configureCompilerClasspath(thread);
+
+			StackFrame frame = thread.frame(frameIndex);
+			Value result = expressionEvaluator.evaluate(frame, expression);
+
+			return String.format("Result: %s", formatValue(result));
+		} catch (Exception e) {
+			return "Error evaluating expression: " + e.getMessage();
+		}
+	}
+
 	@McpTool(description = "Resume execution of all threads in the VM")
 	public String jdwp_resume() {
 		try {
@@ -257,6 +331,69 @@ public class JDWPTools {
 		return doStep(threadId, StepRequest.STEP_OUT, "out");
 	}
 
+	@McpTool(description = "Set a local variable's value in a suspended thread's stack frame")
+	public String jdwp_set_local(
+			@McpToolParam(description = "Thread unique ID") long threadId,
+			@McpToolParam(description = "Frame index (0 = current frame)") int frameIndex,
+			@McpToolParam(description = "Variable name") String varName,
+			@McpToolParam(description = "New value (e.g., '42', '3.14', 'true', '\"hello\"', 'null')") String value) {
+		try {
+			VirtualMachine vm = jdiService.getVM();
+			ThreadReference thread = findThread(vm, threadId);
+			if (thread == null) return "Error: Thread not found with ID " + threadId;
+			if (!thread.isSuspended()) return "Error: Thread is not suspended.";
+
+			StackFrame frame = thread.frame(frameIndex);
+			LocalVariable localVar = frame.visibleVariableByName(varName);
+			if (localVar == null) {
+				return String.format("Error: Variable '%s' not found in frame %d", varName, frameIndex);
+			}
+
+			String parsedValue = value;
+			if (localVar.typeName().equals("java.lang.String") && value.startsWith("\"") && value.endsWith("\"")) {
+				parsedValue = value.substring(1, value.length() - 1);
+			}
+
+			Value newValue = createJdiValue(vm, parsedValue, localVar.type());
+			frame.setValue(localVar, newValue);
+
+			return String.format("Variable '%s' set to %s in frame %d of thread %d", varName, value, frameIndex, threadId);
+		} catch (Exception e) {
+			return "Error setting variable: " + e.getMessage();
+		}
+	}
+
+	@McpTool(description = "Set a field's value on a cached object")
+	public String jdwp_set_field(
+			@McpToolParam(description = "Object unique ID (from jdwp_get_locals or jdwp_get_fields)") long objectId,
+			@McpToolParam(description = "Field name") String fieldName,
+			@McpToolParam(description = "New value (e.g., '42', '3.14', 'true', '\"hello\"', 'null')") String value) {
+		try {
+			ObjectReference obj = jdiService.getCachedObject(objectId);
+			if (obj == null) {
+				return String.format("[ERROR] Object #%d not found in cache", objectId);
+			}
+
+			VirtualMachine vm = jdiService.getVM();
+			Field field = obj.referenceType().fieldByName(fieldName);
+			if (field == null) {
+				return String.format("Error: Field '%s' not found on %s", fieldName, obj.referenceType().name());
+			}
+
+			String parsedValue = value;
+			if (field.typeName().equals("java.lang.String") && value.startsWith("\"") && value.endsWith("\"")) {
+				parsedValue = value.substring(1, value.length() - 1);
+			}
+
+			Value newValue = createJdiValue(vm, parsedValue, field.type());
+			obj.setValue(field, newValue);
+
+			return String.format("Field '%s.%s' set to %s", obj.referenceType().name(), fieldName, value);
+		} catch (Exception e) {
+			return "Error setting field: " + e.getMessage();
+		}
+	}
+
 	/** Performs a single-line step operation (over/into/out) on the given thread. */
 	private String doStep(long threadId, int stepDepth, String label) {
 		try {
@@ -290,16 +427,16 @@ public class JDWPTools {
 		}
 	}
 
-	@McpTool(description = "Set a breakpoint at a specific line in a class. If the class is not yet loaded, the breakpoint is deferred and will activate automatically when the JVM loads the class.")
+	@McpTool(description = "Set a breakpoint at a specific line in a class. Supports conditional breakpoints. If the class is not yet loaded, the breakpoint is deferred.")
 	public String jdwp_set_breakpoint(
-			@McpToolParam(description = "Fully qualified class name (e.g. 'com.axelor.apps.vpauto.repository.DMSFileRepositoryVPAuto')") String className,
+			@McpToolParam(description = "Fully qualified class name (e.g. 'com.example.MyClass')") String className,
 			@McpToolParam(description = "Line number") int lineNumber,
-			@McpToolParam(description = "Suspend policy: 'all' (default, suspends all threads), 'thread' (suspends only the thread that hit the breakpoint), 'none' (no suspension)") String suspendPolicy) {
+			@McpToolParam(description = "Suspend policy: 'all' (default), 'thread', 'none'") String suspendPolicy,
+			@McpToolParam(description = "Optional condition — only suspend when this evaluates to true (e.g., 'i > 100')") String condition) {
 		try {
 			VirtualMachine vm = jdiService.getVM();
 			com.sun.jdi.request.EventRequestManager erm = vm.eventRequestManager();
 
-			// Parse suspend policy upfront
 			int jdiPolicy = com.sun.jdi.request.EventRequest.SUSPEND_ALL;
 			String policyLabel = "all";
 			if (suspendPolicy != null) {
@@ -308,21 +445,23 @@ public class JDWPTools {
 					case "none" -> { jdiPolicy = com.sun.jdi.request.EventRequest.SUSPEND_NONE; policyLabel = "none"; }
 					case "all" -> { /* default */ }
 					default -> {
-						return String.format(
-							"Error: Invalid suspend policy '%s'. Use 'all', 'thread', or 'none'.", suspendPolicy
-						);
+						return String.format("Error: Invalid suspend policy '%s'. Use 'all', 'thread', or 'none'.", suspendPolicy);
 					}
 				}
 			}
 
-			// Find the class
-			List<ReferenceType> classes = vm.classesByName(className);
+			String conditionInfo = (condition != null && !condition.isBlank())
+				? String.format(", condition: %s", condition) : "";
+
+			ReferenceType eagerType = jdiService.findOrForceLoadClass(className);
+			List<ReferenceType> classes = eagerType != null ? List.of(eagerType) : List.of();
 
 			if (classes.isEmpty()) {
-				// Class not loaded yet — create a deferred breakpoint
 				int pendingId = breakpointTracker.registerPendingBreakpoint(className, lineNumber, jdiPolicy, policyLabel);
+				if (condition != null && !condition.isBlank()) {
+					breakpointTracker.setCondition(pendingId, condition);
+				}
 
-				// Register a ClassPrepareRequest to be notified when the class loads
 				if (!breakpointTracker.hasClassPrepareRequest(className)) {
 					com.sun.jdi.request.ClassPrepareRequest cpr = erm.createClassPrepareRequest();
 					cpr.addClassFilter(className);
@@ -331,10 +470,8 @@ public class JDWPTools {
 					breakpointTracker.registerClassPrepareRequest(className, cpr);
 				}
 
-				// Race condition mitigation: re-check if class loaded between our first check and CPR creation
 				List<ReferenceType> recheck = vm.classesByName(className);
 				if (!recheck.isEmpty()) {
-					// Class loaded in the meantime — activate immediately
 					ReferenceType refType = recheck.get(0);
 					List<com.sun.jdi.Location> locations = refType.locationsOfLine(lineNumber);
 					if (!locations.isEmpty()) {
@@ -342,42 +479,102 @@ public class JDWPTools {
 						bpRequest.setSuspendPolicy(jdiPolicy);
 						bpRequest.enable();
 						breakpointTracker.promotePendingToActive(pendingId, bpRequest);
-						return String.format(
-							"Breakpoint set at %s:%d (ID: %d, suspend: %s)",
-							className, lineNumber, pendingId, policyLabel
-						);
+						return String.format("Breakpoint set at %s:%d (ID: %d, suspend: %s%s)",
+							className, lineNumber, pendingId, policyLabel, conditionInfo);
 					}
 				}
 
-				return String.format(
-					"Breakpoint deferred for %s:%d (ID: %d, suspend: %s). " +
+				return String.format("Breakpoint deferred for %s:%d (ID: %d, suspend: %s%s). " +
 					"Class not yet loaded — will activate automatically when the JVM loads it.",
-					className, lineNumber, pendingId, policyLabel
-				);
+					className, lineNumber, pendingId, policyLabel, conditionInfo);
 			}
 
 			ReferenceType refType = classes.get(0);
-
-			// Find location
 			List<com.sun.jdi.Location> locations = refType.locationsOfLine(lineNumber);
 			if (locations.isEmpty()) {
 				return String.format("Error: No executable code found at line %d in class %s", lineNumber, className);
 			}
 
-			com.sun.jdi.Location location = locations.get(0);
-
-			// Create breakpoint
-			com.sun.jdi.request.BreakpointRequest bpRequest = erm.createBreakpointRequest(location);
+			com.sun.jdi.request.BreakpointRequest bpRequest = erm.createBreakpointRequest(locations.get(0));
 			bpRequest.setSuspendPolicy(jdiPolicy);
 			bpRequest.enable();
 
 			int breakpointId = breakpointTracker.registerBreakpoint(bpRequest);
+			if (condition != null && !condition.isBlank()) {
+				breakpointTracker.setCondition(breakpointId, condition);
+			}
 
-			return String.format(
-				"Breakpoint set at %s:%d (ID: %d, suspend: %s)", className, lineNumber, breakpointId, policyLabel
-			);
+			return String.format("Breakpoint set at %s:%d (ID: %d, suspend: %s%s)",
+				className, lineNumber, breakpointId, policyLabel, conditionInfo);
 		} catch (AbsentInformationException e) {
 			return "Error: No line number information available for this class. Compile with debug info (-g).";
+		} catch (Exception e) {
+			return "Error: " + e.getMessage();
+		}
+	}
+
+	@McpTool(description = "Set a logpoint (non-stopping breakpoint) that evaluates an expression and logs the result without pausing execution")
+	public String jdwp_set_logpoint(
+			@McpToolParam(description = "Fully qualified class name") String className,
+			@McpToolParam(description = "Line number") int lineNumber,
+			@McpToolParam(description = "Java expression to evaluate and log (e.g., '\"x=\" + x', 'order.getTotal()')") String expression) {
+		try {
+			VirtualMachine vm = jdiService.getVM();
+			com.sun.jdi.request.EventRequestManager erm = vm.eventRequestManager();
+
+			int jdiPolicy = com.sun.jdi.request.EventRequest.SUSPEND_EVENT_THREAD;
+
+			ReferenceType eagerType = jdiService.findOrForceLoadClass(className);
+			List<ReferenceType> classes = eagerType != null ? List.of(eagerType) : List.of();
+
+			if (classes.isEmpty()) {
+				int pendingId = breakpointTracker.registerPendingBreakpoint(className, lineNumber, jdiPolicy, "thread");
+				breakpointTracker.setLogpointExpression(pendingId, expression);
+
+				if (!breakpointTracker.hasClassPrepareRequest(className)) {
+					com.sun.jdi.request.ClassPrepareRequest cpr = erm.createClassPrepareRequest();
+					cpr.addClassFilter(className);
+					cpr.setSuspendPolicy(com.sun.jdi.request.EventRequest.SUSPEND_EVENT_THREAD);
+					cpr.enable();
+					breakpointTracker.registerClassPrepareRequest(className, cpr);
+				}
+
+				List<ReferenceType> recheck = vm.classesByName(className);
+				if (!recheck.isEmpty()) {
+					ReferenceType refType = recheck.get(0);
+					List<com.sun.jdi.Location> locations = refType.locationsOfLine(lineNumber);
+					if (!locations.isEmpty()) {
+						com.sun.jdi.request.BreakpointRequest bpRequest = erm.createBreakpointRequest(locations.get(0));
+						bpRequest.setSuspendPolicy(jdiPolicy);
+						bpRequest.enable();
+						breakpointTracker.promotePendingToActive(pendingId, bpRequest);
+						return String.format("Logpoint set at %s:%d (ID: %d, expression: %s)",
+							className, lineNumber, pendingId, expression);
+					}
+				}
+
+				return String.format("Logpoint deferred for %s:%d (ID: %d, expression: %s). " +
+					"Class not yet loaded — will activate when the JVM loads it.",
+					className, lineNumber, pendingId, expression);
+			}
+
+			ReferenceType refType = classes.get(0);
+			List<com.sun.jdi.Location> locations = refType.locationsOfLine(lineNumber);
+			if (locations.isEmpty()) {
+				return String.format("Error: No executable code at line %d in class %s", lineNumber, className);
+			}
+
+			com.sun.jdi.request.BreakpointRequest bpRequest = erm.createBreakpointRequest(locations.get(0));
+			bpRequest.setSuspendPolicy(jdiPolicy);
+			bpRequest.enable();
+
+			int breakpointId = breakpointTracker.registerBreakpoint(bpRequest);
+			breakpointTracker.setLogpointExpression(breakpointId, expression);
+
+			return String.format("Logpoint set at %s:%d (ID: %d, expression: %s)",
+				className, lineNumber, breakpointId, expression);
+		} catch (AbsentInformationException e) {
+			return "Error: No line number information available. Compile with debug info (-g).";
 		} catch (Exception e) {
 			return "Error: " + e.getMessage();
 		}
@@ -480,7 +677,16 @@ public class JDWPTools {
 					result.append(String.format("  Method: %s\n", loc.method().name()));
 					result.append(String.format("  Line: %d\n", loc.lineNumber()));
 					result.append(String.format("  Enabled: %s\n", bp.isEnabled()));
-					result.append(String.format("  Suspend: %s\n\n", policyStr));
+					result.append(String.format("  Suspend: %s\n", policyStr));
+					String cond = breakpointTracker.getCondition(id);
+					if (cond != null) {
+						result.append(String.format("  Condition: %s\n", cond));
+					}
+					String logExpr = breakpointTracker.getLogpointExpression(id);
+					if (logExpr != null) {
+						result.append(String.format("  Type: LOGPOINT\n  Expression: %s\n", logExpr));
+					}
+					result.append("\n");
 				}
 			}
 
@@ -527,33 +733,32 @@ public class JDWPTools {
 		}
 	}
 
-	@McpTool(description = "Get recent JDWP events (breakpoints, steps, exceptions, etc.)")
+	@McpTool(description = "Get recent JDWP events (breakpoints, steps, exceptions, logpoints, etc.)")
 	public String jdwp_get_events(@McpToolParam(description = "Number of recent events to retrieve (default: 20, max: 100)") Integer count) {
 		try {
-			if (count == null || count <= 0) {
-				count = 20;
-			}
-			if (count > 100) {
-				count = 100;
-			}
+			if (count == null || count <= 0) count = 20;
+			if (count > 100) count = 100;
 
-			List<String> events = jdiService.getRecentEvents(count);
+			List<EventHistory.DebugEvent> events = eventHistory.getRecent(count);
 
 			if (events.isEmpty()) {
 				return "No events recorded yet.\n\n" +
-					   "The event listener captures all JDWP events including:\n" +
-					   "  - Breakpoints (from IntelliJ or MCP)\n" +
-					   "  - Steps (step over, step into, step out)\n" +
-					   "  - Exceptions\n" +
-					   "  - Method entries/exits (if enabled)\n\n" +
-					   "Events are captured automatically when connected.";
+					"Events are captured automatically when connected:\n" +
+					"  - Breakpoint hits\n" +
+					"  - Step completions\n" +
+					"  - Exception throws\n" +
+					"  - Logpoint evaluations\n" +
+					"  - VM lifecycle events";
 			}
 
 			StringBuilder result = new StringBuilder();
-			result.append(String.format("Recent JDWP events (%d most recent):\n\n", events.size()));
+			result.append(String.format("Recent events (%d of %d total):\n\n", events.size(), eventHistory.size()));
 
 			for (int i = 0; i < events.size(); i++) {
-				result.append(String.format("%d. %s\n", i + 1, events.get(i)));
+				EventHistory.DebugEvent event = events.get(i);
+				result.append(String.format("%d. [%s] %s (%s)\n",
+					i + 1, event.type(), event.summary(),
+					event.timestamp().toString().substring(11, 23)));
 			}
 
 			return result.toString();
@@ -564,36 +769,104 @@ public class JDWPTools {
 
 	@McpTool(description = "Clear the JDWP event history")
 	public String jdwp_clear_events() {
+		eventHistory.clear();
+		return "Event history cleared";
+	}
+
+	@McpTool(description = "Set a breakpoint that triggers when a specific exception is thrown. If the exception class is not yet loaded, the breakpoint is deferred and will activate automatically when the JVM loads it.")
+	public String jdwp_set_exception_breakpoint(
+			@McpToolParam(description = "Exception class name (e.g., 'java.lang.NullPointerException', 'java.lang.Exception' for all)") String exceptionClass,
+			@McpToolParam(description = "Break on caught exceptions (default: true)") Boolean caught,
+			@McpToolParam(description = "Break on uncaught exceptions (default: true)") Boolean uncaught) {
 		try {
-			jdiService.clearEvents();
-			return "Event history cleared";
+			if (caught == null) caught = true;
+			if (uncaught == null) uncaught = true;
+
+			VirtualMachine vm = jdiService.getVM();
+			com.sun.jdi.request.EventRequestManager erm = vm.eventRequestManager();
+
+			// Try eager: check classesByName, and if empty, force-load via Class.forName
+			ReferenceType eagerType = jdiService.findOrForceLoadClass(exceptionClass);
+
+			if (eagerType == null) {
+				// Class not loadable yet — defer
+				int pendingId = breakpointTracker.registerPendingExceptionBreakpoint(exceptionClass, caught, uncaught);
+
+				if (!breakpointTracker.hasClassPrepareRequest(exceptionClass)) {
+					com.sun.jdi.request.ClassPrepareRequest cpr = erm.createClassPrepareRequest();
+					cpr.addClassFilter(exceptionClass);
+					cpr.setSuspendPolicy(com.sun.jdi.request.EventRequest.SUSPEND_EVENT_THREAD);
+					cpr.enable();
+					breakpointTracker.registerClassPrepareRequest(exceptionClass, cpr);
+				}
+
+				return String.format("Exception breakpoint deferred (ID: %d)\n  Exception: %s\n  Caught: %s\n  Uncaught: %s\n" +
+					"Class not yet loaded — will activate automatically when the JVM loads it.",
+					pendingId, exceptionClass, caught, uncaught);
+			}
+
+			ReferenceType refType = eagerType;
+			com.sun.jdi.request.ExceptionRequest exReq = erm.createExceptionRequest(refType, caught, uncaught);
+			exReq.setSuspendPolicy(com.sun.jdi.request.EventRequest.SUSPEND_EVENT_THREAD);
+			exReq.enable();
+
+			int id = breakpointTracker.registerExceptionBreakpoint(exReq, exceptionClass, caught, uncaught);
+
+			return String.format("Exception breakpoint set (ID: %d)\n  Exception: %s\n  Caught: %s\n  Uncaught: %s",
+				id, exceptionClass, caught, uncaught);
 		} catch (Exception e) {
 			return "Error: " + e.getMessage();
 		}
 	}
 
-	@McpTool(description = "Configure exception monitoring (enable/disable caught exceptions, set filters)")
-	public String jdwp_configure_exception_monitoring(
-		@McpToolParam(description = "Enable/disable capturing caught exceptions (true/false, optional)")
-		Boolean captureCaught,
-
-		@McpToolParam(description = "Comma-separated list of packages to monitor (e.g. 'com.axelor,org.myapp') - empty means all (optional)")
-		String includePackages,
-
-		@McpToolParam(description = "Comma-separated list of exception classes to exclude (e.g. 'java.lang.NumberFormatException,java.io.IOException') (optional)")
-		String excludeClasses
-	) {
+	@McpTool(description = "Remove an exception breakpoint by its ID")
+	public String jdwp_clear_exception_breakpoint(@McpToolParam(description = "Exception breakpoint ID") int breakpointId) {
 		try {
-			return jdiService.configureExceptionMonitoring(captureCaught, includePackages, excludeClasses);
+			boolean removed = breakpointTracker.removeExceptionBreakpoint(breakpointId);
+			if (!removed) {
+				return String.format("Exception breakpoint %d not found", breakpointId);
+			}
+			return String.format("Exception breakpoint %d cleared", breakpointId);
 		} catch (Exception e) {
 			return "Error: " + e.getMessage();
 		}
 	}
 
-	@McpTool(description = "Get current exception monitoring configuration")
-	public String jdwp_get_exception_config() {
+	@McpTool(description = "List all exception breakpoints (active and pending)")
+	public String jdwp_list_exception_breakpoints() {
 		try {
-			return jdiService.getExceptionConfig();
+			Map<Integer, BreakpointTracker.ExceptionBreakpointInfo> active = breakpointTracker.getAllExceptionBreakpoints();
+			Map<Integer, BreakpointTracker.PendingExceptionBreakpoint> pending = breakpointTracker.getAllPendingExceptionBreakpoints();
+
+			if (active.isEmpty() && pending.isEmpty()) {
+				return "No exception breakpoints set.\n\nUse jdwp_set_exception_breakpoint() to catch exceptions.";
+			}
+
+			StringBuilder result = new StringBuilder();
+			int i = 1;
+
+			if (!active.isEmpty()) {
+				result.append(String.format("Active exception breakpoints: %d\n\n", active.size()));
+				for (Map.Entry<Integer, BreakpointTracker.ExceptionBreakpointInfo> entry : active.entrySet()) {
+					BreakpointTracker.ExceptionBreakpointInfo info = entry.getValue();
+					result.append(String.format("%d. (ID: %d) %s — caught: %s, uncaught: %s\n",
+						i++, entry.getKey(), info.getExceptionClass(), info.isCaught(), info.isUncaught()));
+				}
+			}
+
+			if (!pending.isEmpty()) {
+				if (!active.isEmpty()) result.append("\n");
+				result.append(String.format("Pending exception breakpoints: %d\n\n", pending.size()));
+				for (Map.Entry<Integer, BreakpointTracker.PendingExceptionBreakpoint> entry : pending.entrySet()) {
+					BreakpointTracker.PendingExceptionBreakpoint pb = entry.getValue();
+					String status = pb.getFailureReason() != null
+						? " [FAILED: " + pb.getFailureReason() + "]" : " [PENDING]";
+					result.append(String.format("%d. (ID: %d) %s — caught: %s, uncaught: %s%s\n",
+						i++, entry.getKey(), pb.getExceptionClass(), pb.isCaught(), pb.isUncaught(), status));
+				}
+			}
+
+			return result.toString();
 		} catch (Exception e) {
 			return "Error: " + e.getMessage();
 		}
@@ -604,8 +877,10 @@ public class JDWPTools {
 		try {
 			int activeCount = breakpointTracker.getAllBreakpoints().size();
 			int pendingCount = breakpointTracker.getAllPendingBreakpoints().size();
+			int exceptionCount = breakpointTracker.getAllExceptionBreakpoints().size()
+				+ breakpointTracker.getAllPendingExceptionBreakpoints().size();
 			int totalCount = activeCount + pendingCount;
-			if (totalCount == 0) {
+			if (totalCount == 0 && exceptionCount == 0) {
 				return "No breakpoints to clear";
 			}
 
@@ -613,8 +888,12 @@ public class JDWPTools {
 			breakpointTracker.clearAll(vm.eventRequestManager());
 			watcherManager.clearAll();
 
-			return String.format("Successfully cleared %d breakpoint(s) (%d active, %d pending) and all associated watchers.",
+			String msg = String.format("Cleared %d breakpoint(s) (%d active, %d pending) and all associated watchers.",
 				totalCount, activeCount, pendingCount);
+			if (exceptionCount > 0) {
+				msg += String.format(" Also cleared %d exception breakpoint(s).", exceptionCount);
+			}
+			return msg;
 		} catch (Exception e) {
 			return "Error: " + e.getMessage();
 		}
@@ -946,6 +1225,26 @@ public class JDWPTools {
 			}
 		}
 		return watchersEvaluated;
+	}
+
+	/** Parses a string value into a JDI Value matching the target type. Supports primitives, String, and null. */
+	private Value createJdiValue(VirtualMachine vm, String valueStr, Type targetType) throws Exception {
+		if ("null".equals(valueStr)) return null;
+
+		String typeName = targetType.name();
+		return switch (typeName) {
+			case "int" -> vm.mirrorOf(Integer.parseInt(valueStr));
+			case "long" -> vm.mirrorOf(Long.parseLong(valueStr.replace("L", "").replace("l", "")));
+			case "double" -> vm.mirrorOf(Double.parseDouble(valueStr));
+			case "float" -> vm.mirrorOf(Float.parseFloat(valueStr.replace("f", "").replace("F", "")));
+			case "boolean" -> vm.mirrorOf(Boolean.parseBoolean(valueStr));
+			case "char" -> vm.mirrorOf(valueStr.charAt(0));
+			case "byte" -> vm.mirrorOf(Byte.parseByte(valueStr));
+			case "short" -> vm.mirrorOf(Short.parseShort(valueStr));
+			case "java.lang.String" -> vm.mirrorOf(valueStr);
+			default -> throw new IllegalArgumentException(
+				"Unsupported type: " + typeName + ". Only primitives, String, and null are supported.");
+		};
 	}
 
 	/** Finds a thread by its unique ID. */

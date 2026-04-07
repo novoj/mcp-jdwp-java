@@ -1,10 +1,16 @@
 package io.mcp.jdwp;
 
+import com.sun.jdi.AbsentInformationException;
 import com.sun.jdi.Location;
+import com.sun.jdi.ReferenceType;
+import com.sun.jdi.ThreadReference;
+import com.sun.jdi.VirtualMachine;
 import com.sun.jdi.request.BreakpointRequest;
 import com.sun.jdi.request.ClassPrepareRequest;
+import com.sun.jdi.request.EventRequest;
 import com.sun.jdi.request.EventRequestManager;
-import com.sun.jdi.ThreadReference;
+import com.sun.jdi.request.ExceptionRequest;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.Collections;
@@ -18,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Tracks breakpoints set by this MCP server and the last thread that hit a breakpoint.
  * Supports both active (resolved) and pending (deferred) breakpoints for classes not yet loaded.
  */
+@Slf4j
 @Service
 public class BreakpointTracker {
 
@@ -25,6 +32,9 @@ public class BreakpointTracker {
 	private final ConcurrentHashMap<Integer, BreakpointRequest> breakpointsById = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<Integer, PendingBreakpoint> pendingBreakpointsById = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<String, ClassPrepareRequest> classPrepareRequests = new ConcurrentHashMap<>();
+	private final ConcurrentHashMap<Integer, BreakpointMetadata> breakpointMetadata = new ConcurrentHashMap<>();
+	private final ConcurrentHashMap<Integer, ExceptionBreakpointInfo> exceptionBreakpointsById = new ConcurrentHashMap<>();
+	private final ConcurrentHashMap<Integer, PendingExceptionBreakpoint> pendingExceptionBreakpointsById = new ConcurrentHashMap<>();
 
 	private volatile ThreadReference lastBreakpointThread;
 	private volatile Integer lastBreakpointId;
@@ -129,6 +139,7 @@ public class BreakpointTracker {
 		breakpointsById.clear();
 
 		pendingBreakpointsById.clear();
+		breakpointMetadata.clear();
 
 		for (ClassPrepareRequest cpr : classPrepareRequests.values()) {
 			try {
@@ -138,6 +149,16 @@ public class BreakpointTracker {
 			}
 		}
 		classPrepareRequests.clear();
+
+		for (ExceptionBreakpointInfo info : exceptionBreakpointsById.values()) {
+			try {
+				erm.deleteEventRequest(info.request);
+			} catch (Exception e) {
+				// VM may already be disconnected
+			}
+		}
+		exceptionBreakpointsById.clear();
+		pendingExceptionBreakpointsById.clear();
 
 		lastBreakpointThread = null;
 		lastBreakpointId = null;
@@ -239,7 +260,9 @@ public class BreakpointTracker {
 	 */
 	private void cleanupClassPrepareRequestIfNeeded(String className) {
 		boolean hasOthers = pendingBreakpointsById.values().stream()
-			.anyMatch(p -> p.getClassName().equals(className));
+				.anyMatch(p -> p.getClassName().equals(className))
+			|| pendingExceptionBreakpointsById.values().stream()
+				.anyMatch(p -> p.getExceptionClass().equals(className));
 		if (!hasOthers) {
 			ClassPrepareRequest cpr = classPrepareRequests.remove(className);
 			if (cpr != null) {
@@ -250,6 +273,184 @@ public class BreakpointTracker {
 				}
 			}
 		}
+	}
+
+	// ── Breakpoint metadata (conditions, logpoints) ──
+
+	public void setCondition(int breakpointId, String condition) {
+		if (condition != null && !condition.isBlank()) {
+			getOrCreateMetadata(breakpointId).condition = condition;
+		}
+	}
+
+	public String getCondition(int breakpointId) {
+		BreakpointMetadata meta = breakpointMetadata.get(breakpointId);
+		return meta != null ? meta.condition : null;
+	}
+
+	public void setLogpointExpression(int breakpointId, String expression) {
+		if (expression != null && !expression.isBlank()) {
+			getOrCreateMetadata(breakpointId).logpointExpression = expression;
+		}
+	}
+
+	public String getLogpointExpression(int breakpointId) {
+		BreakpointMetadata meta = breakpointMetadata.get(breakpointId);
+		return meta != null ? meta.logpointExpression : null;
+	}
+
+	public boolean isLogpoint(int breakpointId) {
+		return getLogpointExpression(breakpointId) != null;
+	}
+
+	private BreakpointMetadata getOrCreateMetadata(int breakpointId) {
+		return breakpointMetadata.computeIfAbsent(breakpointId, k -> new BreakpointMetadata());
+	}
+
+	// ── Exception breakpoint operations ──
+
+	public int registerExceptionBreakpoint(ExceptionRequest req, String exceptionClass, boolean caught, boolean uncaught) {
+		int id = idCounter.getAndIncrement();
+		exceptionBreakpointsById.put(id, new ExceptionBreakpointInfo(exceptionClass, caught, uncaught, req));
+		return id;
+	}
+
+	public synchronized boolean removeExceptionBreakpoint(int id) {
+		ExceptionBreakpointInfo info = exceptionBreakpointsById.remove(id);
+		if (info != null) {
+			try {
+				info.request.virtualMachine().eventRequestManager().deleteEventRequest(info.request);
+			} catch (Exception e) {
+				// VM may already be disconnected
+			}
+			return true;
+		}
+		PendingExceptionBreakpoint pending = pendingExceptionBreakpointsById.remove(id);
+		if (pending != null) {
+			cleanupClassPrepareRequestIfNeeded(pending.getExceptionClass());
+			return true;
+		}
+		return false;
+	}
+
+	public Map<Integer, ExceptionBreakpointInfo> getAllExceptionBreakpoints() {
+		return Collections.unmodifiableMap(exceptionBreakpointsById);
+	}
+
+	public synchronized int registerPendingExceptionBreakpoint(String exceptionClass, boolean caught, boolean uncaught) {
+		int id = idCounter.getAndIncrement();
+		pendingExceptionBreakpointsById.put(id, new PendingExceptionBreakpoint(exceptionClass, caught, uncaught));
+		return id;
+	}
+
+	public List<Map.Entry<Integer, PendingExceptionBreakpoint>> getPendingExceptionBreakpointsForClass(String exceptionClass) {
+		return pendingExceptionBreakpointsById.entrySet().stream()
+			.filter(e -> e.getValue().getExceptionClass().equals(exceptionClass))
+			.toList();
+	}
+
+	public Map<Integer, PendingExceptionBreakpoint> getAllPendingExceptionBreakpoints() {
+		return Collections.unmodifiableMap(pendingExceptionBreakpointsById);
+	}
+
+	public void promotePendingExceptionToActive(int id, ExceptionRequest req) {
+		PendingExceptionBreakpoint pending = pendingExceptionBreakpointsById.remove(id);
+		if (pending != null) {
+			exceptionBreakpointsById.put(id, new ExceptionBreakpointInfo(
+				pending.getExceptionClass(), pending.isCaught(), pending.isUncaught(), req));
+		}
+	}
+
+	public void markPendingExceptionFailed(int id, String reason) {
+		PendingExceptionBreakpoint pending = pendingExceptionBreakpointsById.get(id);
+		if (pending != null) {
+			pending.setFailureReason(reason);
+		}
+	}
+
+	// ── Opportunistic promotion ──
+
+	/**
+	 * Re-attempts to promote every pending breakpoint and pending exception breakpoint by
+	 * re-querying {@code vm.classesByName(...)}. This is the safety net for cases where
+	 * {@link ClassPrepareRequest} does not fire — most notably bootstrap classes loaded by the JVM
+	 * before any debugger event is delivered.
+	 *
+	 * <p>Called from {@link io.mcp.jdwp.JDIConnectionService#getVM()} (every MCP tool call) and
+	 * from {@link io.mcp.jdwp.JdiEventListener} (after every JDI event), so any user interaction
+	 * gives pending items another chance to bind. Best-effort; transient failures are logged at
+	 * debug and the item stays pending for the next retry.
+	 *
+	 * @return number of items promoted in this call
+	 */
+	public synchronized int tryPromotePending(io.mcp.jdwp.JDIConnectionService jdiService, ThreadReference preferredThread) {
+		if (jdiService == null) return 0;
+
+		VirtualMachine vm;
+		EventRequestManager erm;
+		try {
+			vm = jdiService.getRawVM();
+			if (vm == null) return 0;
+			erm = vm.eventRequestManager();
+		} catch (Exception e) {
+			return 0;
+		}
+
+		int promoted = 0;
+
+		// Promote pending line breakpoints
+		for (Map.Entry<Integer, PendingBreakpoint> entry :
+				new java.util.ArrayList<>(pendingBreakpointsById.entrySet())) {
+			int id = entry.getKey();
+			PendingBreakpoint pending = entry.getValue();
+			if (pending.getFailureReason() != null) continue;
+
+			try {
+				ReferenceType refType = jdiService.findOrForceLoadClass(pending.getClassName(), preferredThread);
+				if (refType == null) continue;
+
+				List<Location> locations = refType.locationsOfLine(pending.getLineNumber());
+				if (locations.isEmpty()) continue;
+
+				BreakpointRequest bp = erm.createBreakpointRequest(locations.get(0));
+				bp.setSuspendPolicy(pending.getSuspendPolicy());
+				bp.enable();
+				promotePendingToActive(id, bp);
+				promoted++;
+				log.info("[Tracker] Opportunistically promoted pending breakpoint {} for {}:{}",
+					id, pending.getClassName(), pending.getLineNumber());
+			} catch (AbsentInformationException e) {
+				// Class loaded but no debug info — try again later in case a different version arrives
+			} catch (Exception e) {
+				log.debug("[Tracker] Failed to promote pending breakpoint {}: {}", id, e.getMessage());
+			}
+		}
+
+		// Promote pending exception breakpoints
+		for (Map.Entry<Integer, PendingExceptionBreakpoint> entry :
+				new java.util.ArrayList<>(pendingExceptionBreakpointsById.entrySet())) {
+			int id = entry.getKey();
+			PendingExceptionBreakpoint pending = entry.getValue();
+			if (pending.getFailureReason() != null) continue;
+
+			try {
+				ReferenceType refType = jdiService.findOrForceLoadClass(pending.getExceptionClass(), preferredThread);
+				if (refType == null) continue;
+
+				ExceptionRequest exReq = erm.createExceptionRequest(
+					refType, pending.isCaught(), pending.isUncaught());
+				exReq.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
+				exReq.enable();
+				promotePendingExceptionToActive(id, exReq);
+				promoted++;
+				log.info("[Tracker] Opportunistically promoted pending exception breakpoint {} for {}",
+					id, pending.getExceptionClass());
+			} catch (Exception e) {
+				log.debug("[Tracker] Failed to promote pending exception breakpoint {}: {}", id, e.getMessage());
+			}
+		}
+
+		return promoted;
 	}
 
 	// ── Thread tracking ──
@@ -276,7 +477,10 @@ public class BreakpointTracker {
 	public synchronized void reset() {
 		breakpointsById.clear();
 		pendingBreakpointsById.clear();
+		breakpointMetadata.clear();
 		classPrepareRequests.clear();
+		exceptionBreakpointsById.clear();
+		pendingExceptionBreakpointsById.clear();
 		lastBreakpointThread = null;
 		lastBreakpointId = null;
 		idCounter.set(1);
@@ -308,6 +512,59 @@ public class BreakpointTracker {
 		public String getSuspendPolicyLabel() { return suspendPolicyLabel; }
 		public String getFailureReason() { return failureReason; }
 		/** Records why this pending breakpoint could not be activated (e.g., no executable code at line). */
+		public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
+	}
+
+	/**
+	 * Metadata for a breakpoint: optional condition expression and/or logpoint expression.
+	 */
+	public static class BreakpointMetadata {
+		volatile String condition;
+		volatile String logpointExpression;
+	}
+
+	/**
+	 * Tracks an exception breakpoint created via JDI ExceptionRequest.
+	 */
+	public static class ExceptionBreakpointInfo {
+		private final String exceptionClass;
+		private final boolean caught;
+		private final boolean uncaught;
+		final ExceptionRequest request;
+
+		public ExceptionBreakpointInfo(String exceptionClass, boolean caught, boolean uncaught, ExceptionRequest request) {
+			this.exceptionClass = exceptionClass;
+			this.caught = caught;
+			this.uncaught = uncaught;
+			this.request = request;
+		}
+
+		public String getExceptionClass() { return exceptionClass; }
+		public boolean isCaught() { return caught; }
+		public boolean isUncaught() { return uncaught; }
+		public ExceptionRequest getRequest() { return request; }
+	}
+
+	/**
+	 * An exception breakpoint registered for a class that is not yet loaded by the JVM.
+	 * Will be promoted to an active exception breakpoint when the class loads.
+	 */
+	public static class PendingExceptionBreakpoint {
+		private final String exceptionClass;
+		private final boolean caught;
+		private final boolean uncaught;
+		private volatile String failureReason;
+
+		public PendingExceptionBreakpoint(String exceptionClass, boolean caught, boolean uncaught) {
+			this.exceptionClass = exceptionClass;
+			this.caught = caught;
+			this.uncaught = uncaught;
+		}
+
+		public String getExceptionClass() { return exceptionClass; }
+		public boolean isCaught() { return caught; }
+		public boolean isUncaught() { return uncaught; }
+		public String getFailureReason() { return failureReason; }
 		public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
 	}
 }

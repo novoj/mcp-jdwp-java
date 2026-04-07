@@ -56,7 +56,7 @@ public class ClasspathDiscoverer {
 			ClassLoaderReference contextClassLoader = getContextClassLoader(suspendedThread);
 			if (contextClassLoader == null) {
 				log.warn("[Discoverer] Context classloader is null, falling back to initial classpath only");
-				return new DiscoveryResult(localJdkPath, classpathEntries);
+				return new DiscoveryResult(localJdkPath, classpathEntries, jdkDiscovery.getTargetMajorVersion());
 			}
 
 			// 2c. Prepare ClassType references for known classloader types
@@ -87,7 +87,7 @@ public class ClasspathDiscoverer {
 			long elapsed = System.currentTimeMillis() - startTime;
 			log.info("[Discoverer] Application classpath discovered in {}ms ({} entries)", elapsed, classpathEntries.size());
 
-			return new DiscoveryResult(localJdkPath, classpathEntries);
+			return new DiscoveryResult(localJdkPath, classpathEntries, jdkDiscovery.getTargetMajorVersion());
 
 		} catch (JdkDiscoveryService.JdkNotFoundException e) {
 			// Propagate JDK not found exception - this is a critical error
@@ -105,10 +105,12 @@ public class ClasspathDiscoverer {
 	public static class DiscoveryResult {
 		private final String localJdkPath;
 		private final Set<String> applicationClasspath;
+		private final int targetMajorVersion;
 
-		public DiscoveryResult(String localJdkPath, Set<String> applicationClasspath) {
+		public DiscoveryResult(String localJdkPath, Set<String> applicationClasspath, int targetMajorVersion) {
 			this.localJdkPath = localJdkPath;
 			this.applicationClasspath = applicationClasspath;
+			this.targetMajorVersion = targetMajorVersion;
 		}
 
 		public String getLocalJdkPath() {
@@ -117,6 +119,10 @@ public class ClasspathDiscoverer {
 
 		public Set<String> getApplicationClasspath() {
 			return applicationClasspath;
+		}
+
+		public int getTargetMajorVersion() {
+			return targetMajorVersion;
 		}
 	}
 
