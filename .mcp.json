@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "jdwp-inspector": {
+      "command": "java",
+      "args": ["--add-modules", "jdk.jdi", "-jar", "target/mcp-jdwp-java-1.0.0.jar"],
+      "timeout": 15
+    }
+  }
+}

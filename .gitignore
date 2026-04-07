@@ -13,3 +13,10 @@ pom.xml.versionsBackup
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code local settings (per-user)
+.claude/
+
+# Runtime logs
+mcp-jdwp-inspector.log
+*.log
