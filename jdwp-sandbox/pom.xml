@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.mcp.jdwp</groupId>
+        <artifactId>mcp-jdwp-parent</artifactId>
+        <version>1.0.0</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>jdwp-sandbox</artifactId>
+    <packaging>jar</packaging>
+
+    <name>JDWP Debugging Sandbox</name>
+    <description>
+        Deliberately buggy Java classes used as debugging targets for JDWP "test flights".
+        Each scenario (bank, config, events, order, session) pairs a broken production class
+        with an expected-to-fail test. Tests are compiled but skipped by default — they only
+        run when you explicitly set -DskipTests=false during a test flight.
+    </description>
+
+    <properties>
+        <!-- Sandbox tests are expected-to-fail by design (they exist so an agent can diagnose
+             them live under JDWP). Skip them by default so the reactor stays green. Setting
+             this as a project property (rather than hardcoding it in the surefire plugin
+             configuration) lets a CLI override take effect:
+                 mvn -pl jdwp-sandbox test -DskipTests=false
+             The sibling mcp-server module is unaffected because this property is local to
+             this POM. -->
+        <skipTests>true</skipTests>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+</project>

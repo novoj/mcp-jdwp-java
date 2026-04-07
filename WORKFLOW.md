@@ -40,7 +40,7 @@ mvn clean package -DskipTests
 
 # Step 2: Verify the build succeeded
 # Look for "BUILD SUCCESS" in the output
-powershell -Command "Get-Item C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\target\mcp-jdwp-java-1.0.0.jar | Select-Object Name, Length, LastWriteTime"
+powershell -Command "Get-Item C:\Users\nicolasv\MCP_servers\mcp-jdwp-java\mcp-server\target\mcp-jdwp-java-1.0.0.jar | Select-Object Name, Length, LastWriteTime"
 
 # Step 3: Restart the MCP server in Claude Code
 # In Claude Code: /mcp (disable)

@@ -67,7 +67,7 @@ cd mcp-jdwp-java
 mvn clean package -DskipTests
 ```
 
-This creates: `target/mcp-jdwp-java-1.0.0.jar`
+This creates: `mcp-server/target/mcp-jdwp-java-1.0.0.jar`
 
 ### 2. Claude Code configuration
 
@@ -81,7 +81,7 @@ In `.mcp.json` (at the root of your project):
       "args": [
         "--add-modules", "jdk.jdi",
         "-jar",
-        "C:/Users/nicolasv/MCP_servers/mcp-jdwp-java/target/mcp-jdwp-java-1.0.0.jar"
+        "C:/Users/nicolasv/MCP_servers/mcp-jdwp-java/mcp-server/target/mcp-jdwp-java-1.0.0.jar"
       ]
     }
   }
@@ -693,41 +693,48 @@ _(Already documented above as tool #21)_
 
 ```
 mcp-jdwp-java/
-├── pom.xml                         # Maven configuration
+├── pom.xml                         # Parent POM (reactor)
 ├── mvnw / mvnw.cmd                 # Maven wrapper
 ├── .gitignore
 ├── README.md                       # Main documentation
 ├── WORKFLOW.md                     # Development and debugging guide
 ├── EXPRESSION_EVALUATION.md        # Watchers and evaluation documentation
 │
-├── src/main/
-│   ├── java/io/mcp/jdwp/
-│   │   ├── JDWPMcpServerApplication.java  # Main Spring Boot
-│   │   ├── JDWPTools.java                 # Exposed MCP tools
-│   │   ├── JDIConnectionService.java      # Persistent JDWP connection
-│   │   ├── BreakpointTracker.java         # Breakpoint and current thread tracking
-│   │   ├── JdiEventListener.java          # JDI event listener
+├── mcp-server/                     # Module 1: the MCP server itself
+│   ├── pom.xml
+│   ├── src/main/
+│   │   ├── java/io/mcp/jdwp/
+│   │   │   ├── JDWPMcpServerApplication.java  # Main Spring Boot
+│   │   │   ├── JDWPTools.java                 # Exposed MCP tools
+│   │   │   ├── JDIConnectionService.java      # Persistent JDWP connection
+│   │   │   ├── BreakpointTracker.java         # Breakpoint and current thread tracking
+│   │   │   ├── JdiEventListener.java          # JDI event listener
+│   │   │   │
+│   │   │   ├── watchers/
+│   │   │   │   ├── WatcherManager.java        # Watcher management
+│   │   │   │   └── Watcher.java               # Watcher model
+│   │   │   │
+│   │   │   └── evaluation/
+│   │   │       ├── JdiExpressionEvaluator.java    # Java expression evaluation
+│   │   │       ├── RemoteCodeExecutor.java        # Execution in the target JVM
+│   │   │       ├── InMemoryJavaCompiler.java      # Dynamic compilation (ECJ)
+│   │   │       ├── ClasspathDiscoverer.java       # Classpath discovery
+│   │   │       ├── JdkDiscoveryService.java       # Compatible local JDK detection
+│   │   │       └── exceptions/
+│   │   │           └── JdiEvaluationException.java
 │   │   │
-│   │   ├── watchers/
-│   │   │   ├── WatcherManager.java        # Watcher management
-│   │   │   └── Watcher.java               # Watcher model
-│   │   │
-│   │   └── evaluation/
-│   │       ├── JdiExpressionEvaluator.java    # Java expression evaluation
-│   │       ├── RemoteCodeExecutor.java        # Execution in the target JVM
-│   │       ├── InMemoryJavaCompiler.java      # Dynamic compilation (ECJ)
-│   │       ├── ClasspathDiscoverer.java       # Classpath discovery
-│   │       ├── JdkDiscoveryService.java       # Compatible local JDK detection
-│   │       └── exceptions/
-│   │           └── JdiEvaluationException.java
+│   │   └── resources/
+│   │       ├── application.properties      # Spring Boot config
+│   │       └── logback-spring.xml         # Log configuration
 │   │
-│   └── resources/
-│       ├── application.properties      # Spring Boot config
-│       └── logback-spring.xml         # Log configuration
+│   └── target/
+│       └── mcp-jdwp-java-1.0.0.jar         # Final fat JAR
 │
-└── build/
-    └── libs/
-        └── mcp-jdwp-java-1.0.0.jar    # Final JAR (23 MB)
+└── jdwp-sandbox/                   # Module 2: deliberately broken JDWP test-flight scenarios
+    ├── pom.xml                     # (sandbox tests are skipped by default)
+    └── src/
+        ├── main/java/io/mcp/jdwp/sandbox/  # bank, config, events, order, session
+        └── test/java/io/mcp/jdwp/sandbox/  # expected-to-fail "test flight" tests
 ```
 
 ## Dependencies
@@ -790,7 +797,7 @@ A thread must be stopped at a breakpoint for:
         "--add-modules", "jdk.jdi",
         "-DJVM_JDWP_PORT=12345",
         "-jar",
-        "C:/Users/nicolasv/MCP_servers/mcp-jdwp-java/target/mcp-jdwp-java-1.0.0.jar"
+        "C:/Users/nicolasv/MCP_servers/mcp-jdwp-java/mcp-server/target/mcp-jdwp-java-1.0.0.jar"
       ]
     }
   }

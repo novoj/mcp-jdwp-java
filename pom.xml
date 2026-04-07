@@ -12,12 +12,17 @@
     </parent>
 
     <groupId>io.mcp.jdwp</groupId>
-    <artifactId>mcp-jdwp-java</artifactId>
+    <artifactId>mcp-jdwp-parent</artifactId>
     <version>1.0.0</version>
-    <packaging>jar</packaging>
+    <packaging>pom</packaging>
 
-    <name>MCP JDWP Inspector</name>
-    <description>MCP Server for JDWP inspection using JDI</description>
+    <name>MCP JDWP Inspector (parent)</name>
+    <description>Parent POM for the MCP JDWP Inspector reactor: mcp-server + jdwp-sandbox.</description>
+
+    <modules>
+        <module>mcp-server</module>
+        <module>jdwp-sandbox</module>
+    </modules>
 
     <properties>
         <java.version>17</java.version>
@@ -26,88 +31,5 @@
         <!-- Default empty so surefire's argLine can be extended via -DargLine="..." on the command line -->
         <argLine></argLine>
     </properties>
-
-    <dependencies>
-        <!-- Spring Boot -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter</artifactId>
-        </dependency>
-        <!-- Spring AI MCP Server -->
-        <dependency>
-            <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-starter-mcp-server</artifactId>
-            <version>${spring-ai-mcp.version}</version>
-        </dependency>
-
-        <!-- Eclipse JDT Core Compiler for in-memory Java compilation -->
-        <dependency>
-            <groupId>org.eclipse.jdt</groupId>
-            <artifactId>ecj</artifactId>
-            <version>${ecj.version}</version>
-        </dependency>
-
-        <!-- Lombok -->
-        <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <optional>true</optional>
-        </dependency>
-
-        <!-- Test dependencies -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-    </dependencies>
-
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-                <configuration>
-                    <jvmArguments>--add-modules jdk.jdi</jvmArguments>
-                    <excludes>
-                        <exclude>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                        </exclude>
-                    </excludes>
-                </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <configuration>
-                    <!-- The argLine property comes from the empty default in properties, or from -DargLine on
-                         the command line. This pattern lets users append JVM args (e.g. JDWP agent) without
-                         losing the JDI module flag. -->
-                    <argLine>--add-modules jdk.jdi ${argLine}</argLine>
-                </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <configuration>
-                    <source>${java.version}</source>
-                    <target>${java.version}</target>
-                    <compilerArgs>
-                        <arg>--add-modules</arg>
-                        <arg>jdk.jdi</arg>
-                    </compilerArgs>
-                    <annotationProcessorPaths>
-                        <path>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                            <version>${lombok.version}</version>
-                        </path>
-                    </annotationProcessorPaths>
-                </configuration>
-            </plugin>
-        </plugins>
-    </build>
-
 
 </project>

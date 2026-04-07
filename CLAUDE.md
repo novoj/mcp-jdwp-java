@@ -5,13 +5,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build Commands
 
 ```bash
-mvn compile                        # Compile only
-mvn clean package -DskipTests      # Full build (produces target/mcp-jdwp-java-1.0.0.jar)
+# Run from /workspace (the reactor root). Builds both modules.
+mvn compile                                    # Compile only
+mvn clean package -DskipTests                  # Full build (produces mcp-server/target/mcp-jdwp-java-1.0.0.jar)
+
+# Build only the MCP server (skips the sandbox module entirely):
+mvn -pl mcp-server -am clean package -DskipTests
 ```
 
-There are no tests in this project. The `-DskipTests` flag is standard practice here.
+The repository is a 2-module Maven reactor:
 
-The compiler requires `--add-modules jdk.jdi` (configured in pom.xml). At runtime, the JAR must also be launched with `--add-modules jdk.jdi`.
+- **`mcp-server/`** — the real MCP server. Contains all genuine unit tests; `mvn -pl mcp-server test` runs them.
+- **`jdwp-sandbox/`** — deliberately broken Java classes used as JDWP debugging targets ("test flights"). Sandbox tests are expected-to-fail by design and are **skipped by default** so a normal `mvn test` stays green. Run them explicitly during a test flight with: `mvn -pl jdwp-sandbox test -DskipTests=false`.
+
+The compiler requires `--add-modules jdk.jdi` (configured in `mcp-server/pom.xml`). At runtime, the JAR must also be launched with `--add-modules jdk.jdi`.
 
 ## Architecture
 
