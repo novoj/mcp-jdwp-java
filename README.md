@@ -51,6 +51,11 @@ Tomcat/Application Java (port JVM_JDWP_PORT=5005)
 - Compilation cache for performance
 - Automatic proxy handling (Guice, CGLIB)
 
+✅ **Recursive breakpoint protection**
+- Expression evaluation is safe even when the expression re-enters the breakpointed line
+- Recursive breakpoint / exception / step events are auto-resumed and recorded as `*_SUPPRESSED` entries in the event history instead of deadlocking the server
+- See [Recursive breakpoint protection](#recursive-breakpoint-protection) below for details
+
 
 ## Prerequisites
 
@@ -71,7 +76,42 @@ This creates: `mcp-server/target/mcp-jdwp-java-1.0.0.jar`
 
 ### 2. Claude Code configuration
 
-In `.mcp.json` (at the root of your project):
+#### Option A: `claude mcp add` CLI (recommended)
+
+Register the server once, globally (`-s user`), with generous startup and per-tool timeouts:
+
+```bash
+claude mcp add jdwp-inspector -s user \
+  -e MCP_TIMEOUT=30000 \
+  -e MCP_TOOL_TIMEOUT=120000 \
+  -- java --add-modules jdk.jdi -jar /path/to/mcp-jdwp-java-1.0.0.jar
+```
+
+- `MCP_TIMEOUT` — server startup timeout in ms (default is too short for cold JVM starts)
+- `MCP_TOOL_TIMEOUT` — per-tool-call timeout in ms (expression evaluation and classpath discovery can take a while on first call)
+- `--add-modules jdk.jdi` is **required** at runtime for JDI to be visible
+- Drop `-s user` to scope the registration to the current project only
+
+To change the JVM port or other system properties, add them before `-jar`:
+
+```bash
+claude mcp add jdwp-inspector -s user \
+  -e MCP_TIMEOUT=30000 \
+  -e MCP_TOOL_TIMEOUT=120000 \
+  -- java --add-modules jdk.jdi -DJVM_JDWP_PORT=12345 -jar /path/to/mcp-jdwp-java-1.0.0.jar
+```
+
+**Re-installing:** `claude mcp add` refuses to overwrite an existing entry. Remove it first:
+
+```bash
+claude mcp remove jdwp-inspector -s user
+```
+
+Or edit `~/.claude.json` directly under the `mcpServers` key.
+
+#### Option B: Manual `.mcp.json`
+
+At the root of your project:
 
 ```json
 {
@@ -81,8 +121,12 @@ In `.mcp.json` (at the root of your project):
       "args": [
         "--add-modules", "jdk.jdi",
         "-jar",
-        "C:/Users/nicolasv/MCP_servers/mcp-jdwp-java/mcp-server/target/mcp-jdwp-java-1.0.0.jar"
-      ]
+        "/path/to/mcp-jdwp-java-1.0.0.jar"
+      ],
+      "env": {
+        "MCP_TIMEOUT": "30000",
+        "MCP_TOOL_TIMEOUT": "120000"
+      }
     }
   }
 }
@@ -641,6 +685,50 @@ Remove all watchers from all breakpoints.
 
 ### 30. `jdwp_inspect_stack` 🚀
 _(Already documented above as tool #21)_
+
+## Recursive breakpoint protection
+
+When an expression evaluation at a breakpoint re-enters the breakpointed line — directly (e.g. `this.compute(n - 1)` evaluated while suspended inside `compute`), or indirectly via `toString()`, a `<clinit>`, or a classloader walk — JDI would re-suspend the very thread the outer `invokeMethod` is waiting on, and the MCP server would hang until the client times out. This is the same hazard IntelliJ IDEA's debugger handles by freezing breakpoint processing for the duration of an evaluation.
+
+To prevent the deadlock, every MCP-driven `invokeMethod` chain is wrapped in a per-thread reentrancy guard keyed on `ThreadReference.uniqueID()`. While the firing thread is inside a guarded evaluation, the event listener short-circuits any `BreakpointEvent`, `ExceptionEvent`, or `StepEvent` that fires on that thread:
+
+1. Auto-resumes the event set via `EventSet.resume()` — the target thread continues immediately, no user-facing stop.
+2. Records a `BREAKPOINT_SUPPRESSED` / `EXCEPTION_SUPPRESSED` / `STEP_SUPPRESSED` entry in the event history (visible via `jdwp_get_events`).
+3. Leaves `jdwp_get_current_thread` and the next-event latch untouched, so the user's outer breakpoint context is preserved.
+
+The original breakpoint remains armed and will fire again on the next natural hit.
+
+### Covered invocation sites
+
+Every MCP tool path that calls JDI `invokeMethod` under the hood is guarded:
+
+- `jdwp_evaluate_expression`, `jdwp_assert_expression`, `jdwp_evaluate_watchers`
+- Logpoint and conditional-breakpoint expression evaluation (runs on the JDI listener thread)
+- `jdwp_to_string` — the invoked `toString()` may hit a breakpoint
+- Classpath discovery and local-JDK matching (walks the target VM's classloader graph via `invokeMethod`)
+- Force-load of deferred breakpoint classes via `Class.forName` — the forced `<clinit>` may hit a breakpoint
+
+### Test flight scenario
+
+The `jdwp-sandbox` module ships a deterministic scenario in the `io.mcp.jdwp.sandbox.recursion` package ("Echo Chamber") that reproduces the recursive-breakpoint case from a real JVM.
+
+```bash
+# Terminal 1 — launch the sandbox JVM, paused, listening on port 5005
+mvn -pl jdwp-sandbox test -Dtest=RecursiveCalculatorTest -DskipTests=false -Dmaven.surefire.debug
+
+# From Claude Code (MCP):
+# 1. jdwp_wait_for_attach()
+# 2. jdwp_set_breakpoint("io.mcp.jdwp.sandbox.recursion.RecursiveCalculator", 22)
+#    — line 22 is "int left = compute(n - 1);"
+# 3. jdwp_resume_until_event()
+#    — BP fires once inside compute(5)
+# 4. jdwp_evaluate_expression(threadId, "this.compute(3)")
+#    — returns 2 without deadlock
+# 5. jdwp_get_events()
+#    — shows two BREAKPOINT_SUPPRESSED entries (one per recursive hit in the Fib(3) call tree)
+```
+
+Pre-fix, step 4 hangs until the client times out. Post-fix, it returns `2` immediately and the event history explains exactly what was suppressed and why.
 
 ## Typical workflow
 
