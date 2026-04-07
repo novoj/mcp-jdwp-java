@@ -11,29 +11,48 @@ import java.util.*;
 import java.util.stream.Stream;
 
 /**
- * Discovers a local JDK installation matching the target JVM's Java version.
- * This is essential for the Eclipse JDT compiler to resolve JDK system classes.
+ * Discovers a local JDK installation matching the target JVM's Java version. The Eclipse JDT
+ * compiler used by {@link InMemoryJavaCompiler} needs `--system <jdkPath>` to resolve `java.*`
+ * system classes when compiling expression-evaluator wrapper classes; without this discovery the
+ * compiler can't produce bytecode for the target.
+ *
+ * One-shot, stateful helper: holds {@link #targetMajorVersion} after a successful
+ * {@link #discoverMatchingJdk} so callers can read it without re-running discovery. NOT a Spring
+ * bean — instantiated manually by {@link ClasspathDiscoverer} per discovery call.
+ *
+ * Search strategy (in order):
+ * 1. The target JVM's own `java.home` if accessible from the MCP server's filesystem.
+ * 2. Common per-OS install paths (Adoptium, Oracle, OpenJDK, Zulu on Windows; `/usr/lib/jvm`,
+ *    `/opt` on Linux/Unix).
+ * 3. Directory scan of those parent paths for any subdirectory matching a `<name>-<version>`
+ *    pattern containing the major version.
  */
 @Slf4j
 public class JdkDiscoveryService {
 
 	private final VirtualMachine vm;
+	/** Target JVM major version, populated as a side effect of {@link #discoverMatchingJdk}; 0 until then. */
 	private int targetMajorVersion;
 
 	public JdkDiscoveryService(VirtualMachine vm) {
 		this.vm = vm;
 	}
 
+	/** Returns 0 until {@link #discoverMatchingJdk} has been called successfully. */
 	public int getTargetMajorVersion() {
 		return targetMajorVersion;
 	}
 
 	/**
-	 * Discovers a local JDK matching the target JVM's version.
+	 * Runs the search strategy and returns the absolute path of a JDK home directory matching the
+	 * target JVM. Side effect: populates {@link #targetMajorVersion}. The thrown
+	 * {@link JdkNotFoundException} carries a user-actionable error message listing the common
+	 * installation paths the search probed.
 	 *
-	 * @param suspendedThread Thread suspended at a breakpoint
-	 * @return Path to the local JDK home directory
-	 * @throws JdkNotFoundException if no matching JDK is found
+	 * @param suspendedThread thread suspended at a breakpoint or step (used to invoke
+	 *                        `System.getProperty` in the target VM)
+	 * @return path to the local JDK home directory
+	 * @throws JdkNotFoundException if no matching JDK is found anywhere on the search path
 	 */
 	public String discoverMatchingJdk(ThreadReference suspendedThread) throws JdkNotFoundException {
 		try {
@@ -77,43 +96,46 @@ public class JdkDiscoveryService {
 
 			throw new JdkNotFoundException(errorMessage);
 
-		} catch (JdkNotFoundException e) {
-			throw e;
 		} catch (Exception e) {
+			if (e instanceof JdkNotFoundException jnf) {
+				throw jnf;
+			}
 			throw new JdkNotFoundException("Failed to discover JDK: " + e.getMessage(), e);
 		}
 	}
 
+	/** Invokes `System.getProperty("java.version")` in the target VM. */
 	private String getTargetJavaVersion(ThreadReference suspendedThread) throws Exception {
-		ClassType systemClass = (ClassType) vm.classesByName("java.lang.System").get(0);
-		Method getPropertyMethod = systemClass.methodsByName("getProperty", "(Ljava/lang/String;)Ljava/lang/String;").get(0);
-		StringReference versionArg = vm.mirrorOf("java.version");
-
-		Value result = systemClass.invokeMethod(
-			suspendedThread,
-			getPropertyMethod,
-			Collections.singletonList(versionArg),
-			ClassType.INVOKE_SINGLE_THREADED
-		);
-
-		return ((StringReference) result).value();
+		return getSystemProperty(suspendedThread, "java.version");
 	}
 
+	/** Invokes `System.getProperty("java.home")` in the target VM. */
 	private String getTargetJavaHome(ThreadReference suspendedThread) throws Exception {
+		return getSystemProperty(suspendedThread, "java.home");
+	}
+
+	/**
+	 * Invokes {@code System.getProperty(name)} in the target VM via JDI and returns the string value.
+	 */
+	private String getSystemProperty(ThreadReference suspendedThread, String propertyName) throws Exception {
 		ClassType systemClass = (ClassType) vm.classesByName("java.lang.System").get(0);
 		Method getPropertyMethod = systemClass.methodsByName("getProperty", "(Ljava/lang/String;)Ljava/lang/String;").get(0);
-		StringReference homeArg = vm.mirrorOf("java.home");
+		StringReference nameArg = vm.mirrorOf(propertyName);
 
 		Value result = systemClass.invokeMethod(
 			suspendedThread,
 			getPropertyMethod,
-			Collections.singletonList(homeArg),
+			Collections.singletonList(nameArg),
 			ClassType.INVOKE_SINGLE_THREADED
 		);
 
 		return ((StringReference) result).value();
 	}
 
+	/**
+	 * Parses both the legacy `1.8.x` scheme (returns 8) and the modern `<major>.x.x` scheme
+	 * (returns the first dot-separated integer). Returns 0 on parse failure.
+	 */
 	private int extractMajorVersion(String version) {
 		// Handle both "1.8.0_xxx" (Java 8) and "11.0.21" (Java 9+) formats
 		if (version.startsWith("1.8")) {
@@ -130,6 +152,10 @@ public class JdkDiscoveryService {
 		}
 	}
 
+	/**
+	 * Three-strategy fallback search documented on the class. Returns the first valid JDK home
+	 * found, or `null` if every strategy fails (the caller throws {@link JdkNotFoundException}).
+	 */
 	private String findLocalJdk(int majorVersion, String targetHome) {
 		// Strategy 1: Check if target JVM's java.home is accessible locally
 		if (isValidJdkHome(targetHome)) {
@@ -156,12 +182,16 @@ public class JdkDiscoveryService {
 		return null;
 	}
 
+	/**
+	 * Returns OS-sensitive list of common JDK install paths. On Windows checks Adoptium, Oracle
+	 * Java, OpenJDK, and Zulu directories under `Program Files`; on Linux/Unix checks
+	 * `/usr/lib/jvm` and `/opt`.
+	 */
 	private List<String> getCommonJdkPaths(int majorVersion) {
 		List<String> paths = new ArrayList<>();
 
 		// Windows paths
 		if (System.getProperty("os.name").toLowerCase().contains("win")) {
-			paths.add(String.format("C:\\Program Files\\Eclipse Adoptium\\jdk-%d.0.21.9-hotspot", majorVersion));
 			paths.add(String.format("C:\\Program Files\\Eclipse Adoptium\\jdk-%d", majorVersion));
 			paths.add(String.format("C:\\Program Files\\Java\\jdk-%d", majorVersion));
 			paths.add(String.format("C:\\Program Files\\OpenJDK\\jdk-%d", majorVersion));
@@ -177,6 +207,11 @@ public class JdkDiscoveryService {
 		return paths;
 	}
 
+	/**
+	 * Filesystem scan of the common JDK parent directories looking for a subdirectory whose name
+	 * contains `jdk` or `java` and matches a `-<major>` / `_<major>` version-suffix pattern.
+	 * Returns the first valid JDK home found via {@link #isValidJdkHome}.
+	 */
 	private String searchDirectoriesForJdk(int majorVersion) {
 		List<Path> searchDirs = new ArrayList<>();
 
@@ -219,6 +254,12 @@ public class JdkDiscoveryService {
 		return null;
 	}
 
+	/**
+	 * Detects whether `path` points to a valid JDK home using three layout markers:
+	 * - Java 9+: presence of `jmods/` or `lib/jrt-fs.jar`.
+	 * - Java 8: presence of `lib/rt.jar`.
+	 * - JDK-with-bundled-JRE layout: presence of `jre/lib/rt.jar`.
+	 */
 	private boolean isValidJdkHome(String path) {
 		if (path == null || path.isEmpty()) {
 			return false;

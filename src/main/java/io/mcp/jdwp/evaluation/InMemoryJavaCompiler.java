@@ -2,6 +2,7 @@ package io.mcp.jdwp.evaluation;
 
 import io.mcp.jdwp.evaluation.exceptions.JdiEvaluationException;
 import lombok.extern.slf4j.Slf4j;
+import org.eclipse.jdt.internal.compiler.tool.EclipseCompiler;
 import org.springframework.stereotype.Service;
 
 import javax.tools.*;
@@ -17,23 +18,38 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * Compiles Java source code in memory using the Eclipse JDT Core compiler via the standard Java Compiler API (JSR 199).
- * This service is designed to be self-contained and does not require a JDK to run.
+ * Compiles Java source for the expression-evaluation pipeline using Eclipse JDT (ECJ) via JSR-199.
+ *
+ * Compilation output is captured in memory through {@link MemoryJavaFileManager}, but the input source still
+ * round-trips through a short-lived temp directory because JDT's standard file-object API requires a real
+ * `javax.tools.JavaFileObject` backed by a path. The temp directory is unconditionally deleted in `finally`.
+ *
+ * Requires {@link #configure(String, String, int)} to be called first with the path to a target-matching JDK
+ * (used as `--system <jdkPath>` so JDT can resolve `java.*` system classes) and the target VM's classpath.
+ * Calling {@link #compile(String, String)} without configuration throws {@link JdiEvaluationException}.
+ *
+ * Source/target version is derived from the major version: `1.8` for Java 8, the bare number for Java 9+.
+ * The `-g` flag is always passed so the evaluator can resolve local variable names from the captured bytecode.
  */
 @Slf4j
 @Service
 public class InMemoryJavaCompiler {
 
+	/** Filesystem path to the target-matching JDK; used as `--system` so JDT can resolve system classes. */
 	private String jdkPath;
+	/** Path-separator-delimited classpath of the target VM, populated lazily by {@link #configure}. */
 	private String classpath;
+	/** Target JVM major version (8, 11, 17, ...); defaults to 8 until {@link #configure} is called. */
 	private int targetMajorVersion = 8;
 
 	/**
-	 * Configures the compiler with the target JVM's JDK path, classpath, and target version.
+	 * Configures the compiler with a JDK path, classpath, and target version. Synchronized so that a
+	 * concurrent {@link #compile} sees a fully populated state. A non-positive `targetMajorVersion`
+	 * silently clamps to 8 (the lowest version JDT can target).
 	 *
-	 * @param jdkPath            The file path to the root of the target JDK.
-	 * @param classpath          Classpath string from target JVM (colon or semicolon separated).
-	 * @param targetMajorVersion Target JVM major version (e.g., 8, 11, 17, 21).
+	 * @param jdkPath            file path to the root of a JDK matching the target VM's major version
+	 * @param classpath          target VM classpath (colon- or semicolon-separated, depending on target OS)
+	 * @param targetMajorVersion target JVM major version (e.g., 8, 11, 17, 21); 0 or negative falls back to 8
 	 */
 	public synchronized void configure(String jdkPath, String classpath, int targetMajorVersion) {
 		long startTime = System.currentTimeMillis();
@@ -52,12 +68,14 @@ public class InMemoryJavaCompiler {
 	}
 
 	/**
-	 * Compiles a single Java source file in memory.
+	 * Compiles `sourceCode` into bytecode for `className`. The returned map is keyed by fully qualified
+	 * class name and includes any inner/anonymous classes JDT emits.
 	 *
-	 * @param className  The fully qualified name of the class to compile.
-	 * @param sourceCode The source code of the class.
-	 * @return A map where the key is the class name and the value is the compiled bytecode.
-	 * @throws JdiEvaluationException if compilation fails.
+	 * @param className  fully qualified name of the primary class declared in `sourceCode`
+	 * @param sourceCode complete `.java` source text (must declare a package matching `className`)
+	 * @return map of fully qualified class name to compiled bytecode
+	 * @throws JdiEvaluationException if {@link #configure} was never called, if temp file I/O fails,
+	 *                                or if JDT reports any `Diagnostic.Kind.ERROR` diagnostic
 	 */
 	public Map<String, byte[]> compile(String className, String sourceCode) throws JdiEvaluationException {
 		if (this.jdkPath == null) {
@@ -68,40 +86,22 @@ public class InMemoryJavaCompiler {
 
 		long startTime = System.currentTimeMillis();
 
-		JavaCompiler compiler = new org.eclipse.jdt.internal.compiler.tool.EclipseCompiler();
+		JavaCompiler compiler = new EclipseCompiler();
 		DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
 
 		Path tempDir = null;
 		try (StandardJavaFileManager standardFileManager = compiler.getStandardFileManager(diagnostics, null, null);
 			 MemoryJavaFileManager fileManager = new MemoryJavaFileManager(standardFileManager)) {
 
-			// 1. Create a temporary directory structure for the source file
+			// 1. Write source to a temp file (tempDir captured for cleanup in finally)
 			tempDir = Files.createTempDirectory("mcp-compiler-");
-			String[] packageAndClass = getPackageAndClassName(className);
-			Path packageDir = tempDir;
-			if (packageAndClass[0] != null) {
-				packageDir = tempDir.resolve(packageAndClass[0].replace('.', File.separatorChar));
-				Files.createDirectories(packageDir);
-			}
-			Path sourceFile = packageDir.resolve(packageAndClass[1] + ".java");
+			Path sourceFile = writeSourceFileToTemp(tempDir, className, sourceCode);
 
-			// 2. Write the source code to the temporary file
-			Files.write(sourceFile, sourceCode.getBytes(StandardCharsets.UTF_8));
-
-			// 3. Get a JavaFileObject for the temporary file
+			// 2. Get a JavaFileObject for the temporary file
 			Iterable<? extends JavaFileObject> compilationUnits = standardFileManager.getJavaFileObjects(sourceFile.toFile());
 
-			// 4. Build compiler options
-			List<String> options = new ArrayList<>();
-			String versionStr = targetMajorVersion <= 8 ? "1." + targetMajorVersion : String.valueOf(targetMajorVersion);
-			options.addAll(Arrays.asList("-source", versionStr, "-target", versionStr));
-			options.add("-g"); // Preserve local variable names
-			options.addAll(Arrays.asList("--system", this.jdkPath));
-			if (this.classpath != null && !this.classpath.isEmpty()) {
-				options.addAll(Arrays.asList("-classpath", this.classpath));
-			}
-
-			// 5. Create and run the compilation task
+			// 3. Build compiler options and run the compilation task
+			List<String> options = buildCompilerOptions();
 			JavaCompiler.CompilationTask task = compiler.getTask(
 				null, fileManager, diagnostics, options, null, compilationUnits
 			);
@@ -132,7 +132,7 @@ public class InMemoryJavaCompiler {
 		} catch (IOException e) {
 			throw new JdiEvaluationException("Failed to create or write temporary source file for compilation.", e);
 		} finally {
-			// 6. Clean up the temporary directory
+			// 4. Clean up the temporary directory
 			if (tempDir != null) {
 				try {
 					Files.walk(tempDir)
@@ -146,6 +146,41 @@ public class InMemoryJavaCompiler {
 		}
 	}
 
+	/**
+	 * Materialises the source for {@code className} under {@code tempDir}, creating any required
+	 * package subdirectories. Returns the path of the written {@code .java} file.
+	 */
+	private Path writeSourceFileToTemp(Path tempDir, String className, String sourceCode) throws IOException {
+		String[] packageAndClass = getPackageAndClassName(className);
+		Path packageDir = tempDir;
+		if (packageAndClass[0] != null) {
+			packageDir = tempDir.resolve(packageAndClass[0].replace('.', File.separatorChar));
+			Files.createDirectories(packageDir);
+		}
+		Path sourceFile = packageDir.resolve(packageAndClass[1] + ".java");
+		Files.write(sourceFile, sourceCode.getBytes(StandardCharsets.UTF_8));
+		return sourceFile;
+	}
+
+	/**
+	 * Builds the JDT compiler option list from the configured target version, JDK path, and classpath.
+	 */
+	private List<String> buildCompilerOptions() {
+		List<String> options = new ArrayList<>();
+		String versionStr = targetMajorVersion <= 8 ? "1." + targetMajorVersion : String.valueOf(targetMajorVersion);
+		options.addAll(Arrays.asList("-source", versionStr, "-target", versionStr));
+		options.add("-g"); // Preserve local variable names
+		options.addAll(Arrays.asList("--system", this.jdkPath));
+		if (this.classpath != null && !this.classpath.isEmpty()) {
+			options.addAll(Arrays.asList("-classpath", this.classpath));
+		}
+		return options;
+	}
+
+	/**
+	 * Splits a fully qualified class name into `[packageName, simpleName]`. Returns `[null, simpleName]`
+	 * for default-package classes (no `.` in the name).
+	 */
 	private String[] getPackageAndClassName(String fullClassName) {
 		int lastDot = fullClassName.lastIndexOf('.');
 		if (lastDot == -1) {
@@ -155,7 +190,10 @@ public class InMemoryJavaCompiler {
 	}
 
 	/**
-	 * An in-memory file manager to capture compiled bytecode.
+	 * Captures compiled bytecode in memory while delegating all read operations (source lookup,
+	 * type resolution, classpath scanning) to the underlying standard file manager. Only
+	 * {@link #getJavaFileForOutput} is overridden — JDT writes class files through that hook,
+	 * and we redirect those writes to per-class {@link ByteArrayOutputStream} instances.
 	 */
 	private static class MemoryJavaFileManager extends ForwardingJavaFileManager<JavaFileManager> {
 		private final Map<String, ByteArrayOutputStream> outputStreams = new HashMap<>();
@@ -178,6 +216,11 @@ public class InMemoryJavaCompiler {
 			};
 		}
 
+		/**
+		 * Returns a snapshot copy of the captured bytecode keyed by fully qualified class name.
+		 * Safe to call after the file manager has been closed because the byte arrays are detached
+		 * from the underlying streams.
+		 */
 		public Map<String, byte[]> getCompiledBytecode() {
 			Map<String, byte[]> bytecodeMap = new HashMap<>();
 			for (Map.Entry<String, ByteArrayOutputStream> entry : outputStreams.entrySet()) {

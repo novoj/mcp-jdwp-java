@@ -13,44 +13,73 @@ import com.sun.jdi.request.ExceptionRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Tracks breakpoints set by this MCP server and the last thread that hit a breakpoint.
- * Supports both active (resolved) and pending (deferred) breakpoints for classes not yet loaded.
+ * Central registry for breakpoints owned by the MCP server and a parking spot for the last thread
+ * that hit a suspending event. JDI's `BreakpointRequest` has no user-facing identifier, so this
+ * service mints synthetic monotonic integer IDs and exposes them to the MCP client.
+ *
+ * Maintains four parallel state maps:
+ * - `breakpointsById` — line breakpoints already bound to a JDI `BreakpointRequest`.
+ * - `pendingBreakpointsById` — line breakpoints whose target class is not yet loaded.
+ * - `exceptionBreakpointsById` — exception breakpoints bound to a JDI `ExceptionRequest`.
+ * - `pendingExceptionBreakpointsById` — exception breakpoints whose exception class is not yet loaded.
+ *
+ * Pending entries are promoted to active either by `JdiEventListener.handleClassPrepareEvent` (the
+ * normal path) or by the {@link #tryPromotePending} safety net (called from {@link JDIConnectionService#getVM()}
+ * before every tool call) for classes loaded before any debugger event was delivered.
+ *
+ * Thread-safety: all public mutators are `synchronized`; the read-mostly state maps are
+ * `ConcurrentHashMap` so listeners can iterate without contending with mutators. The `lastBreakpoint*`
+ * fields are `volatile` for cross-thread visibility from the JDI listener thread to MCP worker threads.
  */
 @Slf4j
 @Service
 public class BreakpointTracker {
 
+	/** Monotonic synthetic ID source shared by every register-* call; reset by {@link #clearAll} / {@link #reset}. */
 	private final AtomicInteger idCounter = new AtomicInteger(1);
+	/** Active line breakpoints keyed by synthetic ID; populated by {@link #registerBreakpoint}. */
 	private final ConcurrentHashMap<Integer, BreakpointRequest> breakpointsById = new ConcurrentHashMap<>();
+	/** Line breakpoints awaiting class load; populated by {@link #registerPendingBreakpoint} via `jdwp_set_breakpoint`. */
 	private final ConcurrentHashMap<Integer, PendingBreakpoint> pendingBreakpointsById = new ConcurrentHashMap<>();
+	/** ClassPrepare requests keyed by class name; one per class with at least one pending BP referencing it. */
 	private final ConcurrentHashMap<String, ClassPrepareRequest> classPrepareRequests = new ConcurrentHashMap<>();
+	/** Optional condition / logpoint expression metadata indexed by breakpoint ID. */
 	private final ConcurrentHashMap<Integer, BreakpointMetadata> breakpointMetadata = new ConcurrentHashMap<>();
+	/** Active exception breakpoints keyed by synthetic ID; populated by {@link #registerExceptionBreakpoint}. */
 	private final ConcurrentHashMap<Integer, ExceptionBreakpointInfo> exceptionBreakpointsById = new ConcurrentHashMap<>();
+	/** Exception breakpoints awaiting class load; promoted via {@link #promotePendingExceptionToActive}. */
 	private final ConcurrentHashMap<Integer, PendingExceptionBreakpoint> pendingExceptionBreakpointsById = new ConcurrentHashMap<>();
 
-	private volatile ThreadReference lastBreakpointThread;
-	private volatile Integer lastBreakpointId;
+	/**
+	 * Atomic snapshot of the last suspending JDI event: the firing {@link ThreadReference} paired
+	 * with the synthetic breakpoint ID (or {@code -1} sentinel for non-breakpoint events such as
+	 * exceptions). Stored in a single volatile field so readers cannot observe a torn pair from
+	 * two different writes (FINDING-9). {@code null} until the first event lands or after a reset.
+	 */
+	private volatile LastBreakpoint lastBreakpoint;
 
 	/**
-	 * Single-shot latch backing {@link io.mcp.jdwp.JDWPTools#jdwp_resume_until_event(Integer)}.
-	 * Lifecycle: armed by {@link #armNextEventLatch()} immediately before {@code vm.resume()},
+	 * Single-shot latch backing {@link JDWPTools#jdwp_resume_until_event(Integer)}.
+	 * Lifecycle: armed by {@link #armNextEventLatch()} immediately before `vm.resume()`,
 	 * counted down by {@link #fireNextEvent()} from the JDI listener thread when the next
 	 * suspending event (BP / step / exception) lands, and released-then-cleared by
-	 * {@link #clearAll(EventRequestManager)} / {@link #reset()} so a {@code jdwp_reset} or
-	 * {@code jdwp_disconnect} from another caller does not leave a waiter hanging.
+	 * {@link #clearAll(EventRequestManager)} / {@link #reset()} so a `jdwp_reset` or
+	 * `jdwp_disconnect` from another caller does not leave a waiter hanging.
 	 *
-	 * <p>{@code volatile} for cross-thread visibility; mutating methods that touch the field
-	 * are {@code synchronized} so the arm-then-fire ordering is atomic.
+	 * `volatile` for cross-thread visibility; mutating methods that touch the field are
+	 * `synchronized` so the arm-then-fire ordering is atomic.
 	 */
-	private volatile java.util.concurrent.CountDownLatch nextEventLatch;
+	private volatile CountDownLatch nextEventLatch;
 
 	// ── Active breakpoint operations ──
 
@@ -71,7 +100,9 @@ public class BreakpointTracker {
 	}
 
 	/**
-	 * Remove a breakpoint by ID — checks active first, then pending.
+	 * Remove a breakpoint by ID — checks active first, then pending. Also clears any condition or
+	 * logpoint metadata associated with the synthetic ID so it does not leak after removal
+	 * (FINDING-8).
 	 *
 	 * @return true if found and removed
 	 */
@@ -84,6 +115,7 @@ public class BreakpointTracker {
 			} catch (Exception e) {
 				// VM may already be disconnected
 			}
+			breakpointMetadata.remove(id);
 			return true;
 		}
 
@@ -91,6 +123,7 @@ public class BreakpointTracker {
 		PendingBreakpoint pending = pendingBreakpointsById.remove(id);
 		if (pending != null) {
 			cleanupClassPrepareRequestIfNeeded(pending.getClassName());
+			breakpointMetadata.remove(id);
 			return true;
 		}
 
@@ -98,10 +131,19 @@ public class BreakpointTracker {
 	}
 
 	/**
-	 * Remove a breakpoint by its JDI request reference (reverse lookup).
+	 * Removes the in-memory tracking entry for the given JDI request via identity comparison and
+	 * clears any condition / logpoint metadata associated with its synthetic ID (FINDING-8).
+	 *
+	 * Does NOT call `EventRequestManager.deleteEventRequest`. Callers (currently
+	 * {@link JDWPTools#jdwp_clear_breakpoint}) are responsible for deleting the underlying JDI request
+	 * before invoking this method, otherwise the request stays alive in the target VM.
 	 */
 	public void unregisterByRequest(BreakpointRequest bp) {
+		Integer id = findIdByRequest(bp);
 		breakpointsById.entrySet().removeIf(e -> e.getValue() == bp);
+		if (id != null) {
+			breakpointMetadata.remove(id);
+		}
 	}
 
 	/**
@@ -139,20 +181,19 @@ public class BreakpointTracker {
 	}
 
 	/**
-	 * Clear all tracked breakpoints (active + pending) and delete their JDI event requests.
-	 * Also releases any pending {@code resume_until_event} waiter so a {@code jdwp_reset}
-	 * from another caller does not leave it hanging until timeout.
+	 * Clean shutdown variant: clears every state map (active line BPs, pending line BPs, exception BPs,
+	 * pending exception BPs, breakpoint metadata, ClassPrepare requests) and deletes the underlying
+	 * JDI event requests via `erm`. Also releases any pending `resume_until_event` waiter so a
+	 * `jdwp_reset` or `jdwp_disconnect` from another caller does not leave it hanging until timeout.
+	 *
+	 * Counterpart of {@link #reset()}, which performs the same in-memory cleanup but skips the JDI
+	 * calls — used when the target VM is already gone.
 	 */
 	public synchronized void clearAll(EventRequestManager erm) {
-		// Release any awaiter BEFORE we touch the rest of the state — the awaiter would
-		// otherwise hang for the full timeout window.
+		// Release any awaiter BEFORE we touch state — see fireNextEvent() for why this matters.
 		fireNextEvent();
 		for (BreakpointRequest bp : breakpointsById.values()) {
-			try {
-				erm.deleteEventRequest(bp);
-			} catch (Exception e) {
-				// VM may already be disconnected
-			}
+			deleteQuietly(erm, bp);
 		}
 		breakpointsById.clear();
 
@@ -160,27 +201,27 @@ public class BreakpointTracker {
 		breakpointMetadata.clear();
 
 		for (ClassPrepareRequest cpr : classPrepareRequests.values()) {
-			try {
-				erm.deleteEventRequest(cpr);
-			} catch (Exception e) {
-				// VM may already be disconnected
-			}
+			deleteQuietly(erm, cpr);
 		}
 		classPrepareRequests.clear();
 
 		for (ExceptionBreakpointInfo info : exceptionBreakpointsById.values()) {
-			try {
-				erm.deleteEventRequest(info.request);
-			} catch (Exception e) {
-				// VM may already be disconnected
-			}
+			deleteQuietly(erm, info.request);
 		}
 		exceptionBreakpointsById.clear();
 		pendingExceptionBreakpointsById.clear();
 
-		lastBreakpointThread = null;
-		lastBreakpointId = null;
+		lastBreakpoint = null;
 		idCounter.set(1);
+	}
+
+	/** Best-effort delete of a JDI event request — swallows any exception (e.g., VM already disconnected). */
+	private static void deleteQuietly(EventRequestManager erm, EventRequest req) {
+		try {
+			erm.deleteEventRequest(req);
+		} catch (Exception e) {
+			// VM may already be disconnected
+		}
 	}
 
 	// ── Pending breakpoint operations ──
@@ -295,6 +336,12 @@ public class BreakpointTracker {
 
 	// ── Breakpoint metadata (conditions, logpoints) ──
 
+	/**
+	 * Records a condition expression for the given breakpoint. Blank/null conditions are silently
+	 * ignored — no metadata row is created. Conditions are evaluated against frame 0 by
+	 * {@link JdiEventListener#evaluateCondition} on every BP hit; if the expression evaluates to
+	 * false the listener auto-resumes without notifying the user.
+	 */
 	public void setCondition(int breakpointId, String condition) {
 		if (condition != null && !condition.isBlank()) {
 			getOrCreateMetadata(breakpointId).condition = condition;
@@ -306,6 +353,13 @@ public class BreakpointTracker {
 		return meta != null ? meta.condition : null;
 	}
 
+	/**
+	 * Marks the breakpoint as a logpoint by attaching an expression to evaluate on each hit.
+	 * Blank/null expressions are silently ignored — no metadata row is created. A non-null logpoint
+	 * expression flips the breakpoint's behaviour: {@link JdiEventListener#handleBreakpointEvent}
+	 * evaluates the expression via {@link io.mcp.jdwp.evaluation.JdiExpressionEvaluator}, records a
+	 * `LOGPOINT` (or `LOGPOINT_ERROR`) entry in {@link EventHistory}, and auto-resumes the thread.
+	 */
 	public void setLogpointExpression(int breakpointId, String expression) {
 		if (expression != null && !expression.isBlank()) {
 			getOrCreateMetadata(breakpointId).logpointExpression = expression;
@@ -327,12 +381,23 @@ public class BreakpointTracker {
 
 	// ── Exception breakpoint operations ──
 
+	/**
+	 * Registers an active exception breakpoint and returns its synthetic ID. Twin of
+	 * {@link #registerBreakpoint} for the exception side of the state machine.
+	 */
 	public int registerExceptionBreakpoint(ExceptionRequest req, String exceptionClass, boolean caught, boolean uncaught) {
 		int id = idCounter.getAndIncrement();
 		exceptionBreakpointsById.put(id, new ExceptionBreakpointInfo(exceptionClass, caught, uncaught, req));
 		return id;
 	}
 
+	/**
+	 * Removes an exception breakpoint by ID — checks active first, then pending. Active removals
+	 * also delete the underlying JDI `ExceptionRequest`; pending removals additionally clean up the
+	 * `ClassPrepareRequest` if no other pending item still references the same exception class.
+	 *
+	 * @return `true` if found and removed, `false` if no entry exists for the given ID
+	 */
 	public synchronized boolean removeExceptionBreakpoint(int id) {
 		ExceptionBreakpointInfo info = exceptionBreakpointsById.remove(id);
 		if (info != null) {
@@ -351,26 +416,43 @@ public class BreakpointTracker {
 		return false;
 	}
 
+	/** Returns an unmodifiable snapshot of all currently-active exception breakpoints. */
 	public Map<Integer, ExceptionBreakpointInfo> getAllExceptionBreakpoints() {
 		return Collections.unmodifiableMap(exceptionBreakpointsById);
 	}
 
+	/**
+	 * Registers a pending exception breakpoint for a class not yet loaded. Twin of
+	 * {@link #registerPendingBreakpoint} for the exception side of the state machine. The caller
+	 * is expected to also register a `ClassPrepareRequest` so {@link JdiEventListener#handleClassPrepareEvent}
+	 * can promote it via {@link #promotePendingExceptionToActive}.
+	 */
 	public synchronized int registerPendingExceptionBreakpoint(String exceptionClass, boolean caught, boolean uncaught) {
 		int id = idCounter.getAndIncrement();
 		pendingExceptionBreakpointsById.put(id, new PendingExceptionBreakpoint(exceptionClass, caught, uncaught));
 		return id;
 	}
 
+	/**
+	 * Returns every pending exception breakpoint that targets the given class name. Used by the
+	 * class-prepare handler to know which entries to promote when the class loads.
+	 */
 	public List<Map.Entry<Integer, PendingExceptionBreakpoint>> getPendingExceptionBreakpointsForClass(String exceptionClass) {
 		return pendingExceptionBreakpointsById.entrySet().stream()
 			.filter(e -> e.getValue().getExceptionClass().equals(exceptionClass))
 			.toList();
 	}
 
+	/** Returns an unmodifiable snapshot of all currently-pending exception breakpoints. */
 	public Map<Integer, PendingExceptionBreakpoint> getAllPendingExceptionBreakpoints() {
 		return Collections.unmodifiableMap(pendingExceptionBreakpointsById);
 	}
 
+	/**
+	 * Promotes a pending exception breakpoint to active by removing it from the pending map and
+	 * inserting an {@link ExceptionBreakpointInfo} under the same synthetic ID. No-op if the ID is
+	 * unknown (e.g., the user removed it between class-prepare and promotion).
+	 */
 	public void promotePendingExceptionToActive(int id, ExceptionRequest req) {
 		PendingExceptionBreakpoint pending = pendingExceptionBreakpointsById.remove(id);
 		if (pending != null) {
@@ -379,6 +461,11 @@ public class BreakpointTracker {
 		}
 	}
 
+	/**
+	 * Records why a pending exception breakpoint could not be activated (e.g., the exception class
+	 * exists but cannot be force-loaded). The pending entry stays in the map so the failure reason
+	 * is visible to `jdwp_list_exception_breakpoints`.
+	 */
 	public void markPendingExceptionFailed(int id, String reason) {
 		PendingExceptionBreakpoint pending = pendingExceptionBreakpointsById.get(id);
 		if (pending != null) {
@@ -390,18 +477,18 @@ public class BreakpointTracker {
 
 	/**
 	 * Re-attempts to promote every pending breakpoint and pending exception breakpoint by
-	 * re-querying {@code vm.classesByName(...)}. This is the safety net for cases where
+	 * re-querying `vm.classesByName(...)`. This is the safety net for cases where
 	 * {@link ClassPrepareRequest} does not fire — most notably bootstrap classes loaded by the JVM
 	 * before any debugger event is delivered.
 	 *
-	 * <p>Called from {@link io.mcp.jdwp.JDIConnectionService#getVM()} (every MCP tool call) and
-	 * from {@link io.mcp.jdwp.JdiEventListener} (after every JDI event), so any user interaction
+	 * Called from {@link JDIConnectionService#getVM()} (every MCP tool call) and
+	 * from {@link JdiEventListener} (after every JDI event), so any user interaction
 	 * gives pending items another chance to bind. Best-effort; transient failures are logged at
 	 * debug and the item stays pending for the next retry.
 	 *
 	 * @return number of items promoted in this call
 	 */
-	public synchronized int tryPromotePending(io.mcp.jdwp.JDIConnectionService jdiService, ThreadReference preferredThread) {
+	public synchronized int tryPromotePending(JDIConnectionService jdiService, ThreadReference preferredThread) {
 		if (jdiService == null) return 0;
 
 		VirtualMachine vm;
@@ -418,7 +505,7 @@ public class BreakpointTracker {
 
 		// Promote pending line breakpoints
 		for (Map.Entry<Integer, PendingBreakpoint> entry :
-				new java.util.ArrayList<>(pendingBreakpointsById.entrySet())) {
+				new ArrayList<>(pendingBreakpointsById.entrySet())) {
 			int id = entry.getKey();
 			PendingBreakpoint pending = entry.getValue();
 			if (pending.getFailureReason() != null) continue;
@@ -446,7 +533,7 @@ public class BreakpointTracker {
 
 		// Promote pending exception breakpoints
 		for (Map.Entry<Integer, PendingExceptionBreakpoint> entry :
-				new java.util.ArrayList<>(pendingExceptionBreakpointsById.entrySet())) {
+				new ArrayList<>(pendingExceptionBreakpointsById.entrySet())) {
 			int id = entry.getKey();
 			PendingExceptionBreakpoint pending = entry.getValue();
 			if (pending.getFailureReason() != null) continue;
@@ -474,44 +561,70 @@ public class BreakpointTracker {
 	// ── Thread tracking ──
 
 	/**
-	 * Record which thread last hit a breakpoint.
+	 * Records which thread last fired a suspending event so {@link #getLastBreakpointThread} and
+	 * `jdwp_get_current_thread` can resolve a default thread when none is supplied. Pass `-1` for
+	 * `breakpointId` for non-breakpoint events (currently used by exception events).
+	 *
+	 * Publishes the {@code (thread, id)} pair atomically via a single volatile reference so
+	 * concurrent readers cannot observe a crossed pair (FINDING-9).
 	 */
 	public void setLastBreakpointThread(ThreadReference thread, int breakpointId) {
-		this.lastBreakpointThread = thread;
-		this.lastBreakpointId = breakpointId;
+		this.lastBreakpoint = new LastBreakpoint(thread, breakpointId);
 	}
 
 	public ThreadReference getLastBreakpointThread() {
-		return lastBreakpointThread;
+		LastBreakpoint snapshot = lastBreakpoint;
+		return snapshot != null ? snapshot.thread() : null;
 	}
 
 	public Integer getLastBreakpointId() {
-		return lastBreakpointId;
+		LastBreakpoint snapshot = lastBreakpoint;
+		return snapshot != null ? snapshot.id() : null;
 	}
+
+	/**
+	 * Atomic snapshot of the last suspending JDI event. Callers that need a consistent
+	 * {@code (thread, id)} pair (e.g. {@code jdwp_get_current_thread}) must use this method
+	 * rather than the individual getters, which can otherwise observe values from two different
+	 * writes when called consecutively.
+	 *
+	 * @return the most recent {@link LastBreakpoint} snapshot, or {@code null} if no event has
+	 *         fired since the last reset
+	 */
+	public LastBreakpoint getLastBreakpoint() {
+		return lastBreakpoint;
+	}
+
+	/**
+	 * Immutable {@code (thread, id)} pair published atomically in {@link #lastBreakpoint}. Using a
+	 * record means readers either see a complete pair from one write or no pair at all — never a
+	 * crossed pair from two different writes.
+	 */
+	public record LastBreakpoint(ThreadReference thread, Integer id) {}
 
 	/**
 	 * Arms a fresh single-shot latch that will be released the next time {@link #fireNextEvent()}
 	 * is called. Returns the latch — callers should arm BEFORE resuming the VM and then await on
 	 * the returned latch to avoid the race where the event fires between resume and arm.
 	 *
-	 * <p>Used by {@link io.mcp.jdwp.JDWPTools#jdwp_resume_until_event(Integer)} to implement
-	 * synchronous "resume and wait for next stop". Replaces any previously-armed latch.
+	 * Used by {@link JDWPTools#jdwp_resume_until_event(Integer)} to implement synchronous
+	 * "resume and wait for next stop". Replaces any previously-armed latch.
 	 */
-	public synchronized java.util.concurrent.CountDownLatch armNextEventLatch() {
-		this.nextEventLatch = new java.util.concurrent.CountDownLatch(1);
+	public synchronized CountDownLatch armNextEventLatch() {
+		this.nextEventLatch = new CountDownLatch(1);
 		return this.nextEventLatch;
 	}
 
 	/**
-	 * Releases the currently-armed latch (if any) and clears it. Called by {@link io.mcp.jdwp.JdiEventListener}
-	 * after every BP/step/exception event so that {@code jdwp_resume_until_event} can return.
+	 * Releases the currently-armed latch (if any) and clears it. Called by {@link JdiEventListener}
+	 * after every BP/step/exception event so that `jdwp_resume_until_event` can return.
 	 *
-	 * <p>{@code synchronized} so an arm + fire pair is atomic — without this lock, the JDI
-	 * listener thread could read a stale {@code nextEventLatch}, count down the wrong latch,
-	 * and leave a fresh awaiter hanging.
+	 * `synchronized` so an arm + fire pair is atomic — without this lock, the JDI listener thread
+	 * could read a stale `nextEventLatch`, count down the wrong latch, and leave a fresh awaiter
+	 * hanging.
 	 */
 	public synchronized void fireNextEvent() {
-		java.util.concurrent.CountDownLatch latch = this.nextEventLatch;
+		CountDownLatch latch = this.nextEventLatch;
 		if (latch != null) {
 			latch.countDown();
 			this.nextEventLatch = null;
@@ -519,11 +632,13 @@ public class BreakpointTracker {
 	}
 
 	/**
-	 * Reset all state (called on disconnect).
+	 * Best-effort, in-memory-only state wipe. Counterpart to {@link #clearAll(EventRequestManager)}
+	 * for the "VM is dead" path: skips the JDI `deleteEventRequest` calls because they would fail
+	 * anyway when the target VM is unreachable. Called from {@link JDIConnectionService#cleanupSessionState}
+	 * during disconnect cleanup.
 	 */
 	public synchronized void reset() {
-		// Release any awaiter BEFORE we drop the latch reference — otherwise a thread parked
-		// in jdwp_resume_until_event would block until its timeout.
+		// Release any awaiter BEFORE we touch state — see fireNextEvent() for why this matters.
 		fireNextEvent();
 		breakpointsById.clear();
 		pendingBreakpointsById.clear();
@@ -531,8 +646,7 @@ public class BreakpointTracker {
 		classPrepareRequests.clear();
 		exceptionBreakpointsById.clear();
 		pendingExceptionBreakpointsById.clear();
-		lastBreakpointThread = null;
-		lastBreakpointId = null;
+		lastBreakpoint = null;
 		idCounter.set(1);
 	}
 
@@ -569,7 +683,9 @@ public class BreakpointTracker {
 	 * Metadata for a breakpoint: optional condition expression and/or logpoint expression.
 	 */
 	public static class BreakpointMetadata {
+		/** Boolean expression evaluated against frame 0 by {@link JdiEventListener#evaluateCondition}; `null` until set. */
 		volatile String condition;
+		/** Logpoint expression — when non-null, the breakpoint auto-resumes and records the result to {@link EventHistory}. */
 		volatile String logpointExpression;
 	}
 
@@ -615,6 +731,7 @@ public class BreakpointTracker {
 		public boolean isCaught() { return caught; }
 		public boolean isUncaught() { return uncaught; }
 		public String getFailureReason() { return failureReason; }
+		/** Records why this pending exception breakpoint could not be activated (mirrors {@link PendingBreakpoint#setFailureReason}). */
 		public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
 	}
 }

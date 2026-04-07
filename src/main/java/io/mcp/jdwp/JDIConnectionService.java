@@ -15,10 +15,22 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static io.mcp.jdwp.ThreadFormatting.isJvmInternalThread;
+
 /**
- * Singleton service maintaining a persistent JDI connection to a remote JDWP-enabled JVM.
- * Provides auto-reconnect, object reference caching for cross-call object graph navigation,
- * and classpath discovery for expression evaluation.
+ * Singleton service maintaining a persistent JDI connection to a JDWP-enabled target JVM.
+ *
+ * Responsibilities:
+ * - Connect / disconnect / auto-reconnect on a dropped connection (see {@link #getVM()}).
+ * - Object reference caching: every JDI {@link ObjectReference} returned via {@link #formatFieldValue}
+ *   is stored in {@link #objectCache} so subsequent tool calls can navigate object graphs by ID.
+ *   The cache is cleared on disconnect and `jdwp_reset`.
+ * - Classpath discovery for expression evaluation: collaborates with {@link ClasspathDiscoverer}
+ *   and {@link io.mcp.jdwp.evaluation.JdkDiscoveryService} on the first breakpoint hit and caches
+ *   the result in {@link #cachedClasspath} / {@link #discoveredJdkPath} until disconnect.
+ *
+ * Thread-safety: all public mutators are `synchronized` on the service instance; the object cache
+ * is a {@link ConcurrentHashMap}; the classpath/JDK fields are `volatile` for cross-thread reads.
  */
 @Slf4j
 @Service
@@ -29,16 +41,16 @@ public class JDIConnectionService {
 	private final EventHistory eventHistory;
 	private final WatcherManager watcherManager;
 
-	private VirtualMachine vm = null;
-	private String lastHost = null;
+	private VirtualMachine vm;
+	private String lastHost;
 	private int lastPort = 0;
 
-	// Cache to store encountered ObjectReferences
+	/**
+	 * Maps {@link ObjectReference#uniqueID()} to the live JDI mirror so MCP tools can reference
+	 * objects by ID across multiple calls. Populated as a side effect of {@link #formatFieldValue}
+	 * (and {@link #getArrayElements}); cleared on disconnect and on `jdwp_reset`.
+	 */
 	private final Map<Long, ObjectReference> objectCache = new ConcurrentHashMap<>();
-
-	private static final java.util.Set<String> BOXED_PRIMITIVE_TYPES = java.util.Set.of(
-		"java.lang.Integer", "java.lang.Long", "java.lang.Double", "java.lang.Float",
-		"java.lang.Boolean", "java.lang.Character", "java.lang.Byte", "java.lang.Short");
 
 	public JDIConnectionService(JdiEventListener eventListener, BreakpointTracker breakpointTracker,
 								EventHistory eventHistory, WatcherManager watcherManager) {
@@ -48,15 +60,29 @@ public class JDIConnectionService {
 		this.watcherManager = watcherManager;
 	}
 
-	// Cached classpath from target JVM (discovered once)
-	private volatile String cachedClasspath = null;
+	/**
+	 * Cached path-separated classpath of the target JVM. Populated by {@link #discoverClasspath}
+	 * on the first successful call and reused thereafter; cleared on disconnect.
+	 */
+	private volatile String cachedClasspath;
 
-	// Discovered local JDK path matching target JVM version
-	private volatile String discoveredJdkPath = null;
+	/**
+	 * Filesystem path to a local JDK matching the target JVM version. Populated as a side effect of
+	 * {@link #discoverClasspath} and consumed by {@link io.mcp.jdwp.evaluation.InMemoryJavaCompiler}
+	 * for the `--system` argument; cleared on disconnect.
+	 */
+	private volatile String discoveredJdkPath;
+	/**
+	 * Major Java version of the target JVM (e.g., 8, 11, 17, 21); 0 until {@link #discoverClasspath}
+	 * has been called. Used by the JDT compiler to pick the correct `-source`/`-target` strings.
+	 */
 	private volatile int targetMajorVersion = 0;
 
 	/**
-	 * Check if VM connection is alive
+	 * Cheap liveness probe — issues `vm.name()` and treats any exception as a dead connection.
+	 *
+	 * Side effect: clears the {@link #vm} reference on failure so the next call to {@link #ensureConnected}
+	 * triggers a fresh attach via the cached host/port.
 	 */
 	private boolean isVMAlive() {
 		if (vm == null) {
@@ -125,7 +151,9 @@ public class JDIConnectionService {
 	}
 
 	/**
-	 * Ensure connection is alive, reconnect if needed
+	 * Verifies the VM connection is alive, attempting a single reconnect using the host/port from the
+	 * last successful {@link #connect}. Throws with a "use jdwp_connect first" hint if no prior
+	 * connection was ever attempted (cached host/port are null/0).
 	 */
 	private synchronized void ensureConnected() throws Exception {
 		if (vm == null || !isVMAlive()) {
@@ -154,24 +182,25 @@ public class JDIConnectionService {
 	/**
 	 * Releases all session-bound state held by the MCP server: JDI event requests, object cache,
 	 * watchers, classpath cache, event history, and the VM reference itself. Best-effort —
-	 * tolerates a dead VM (uses {@code reset()} as a fallback when JDI calls would fail).
+	 * tolerates a dead VM (uses `reset()` as a fallback when JDI calls would fail).
 	 *
-	 * <p>Called from both {@link #disconnect()} (clean shutdown) and {@link #connect(String, int)}
+	 * Called from both {@link #disconnect()} (clean shutdown) and {@link #connect(String, int)}
 	 * when a stale connection is detected (target VM died but the user reconnects). Without this,
 	 * the MCP server would accumulate breakpoints, watchers, and ObjectReferences across sessions.
 	 */
 	private void cleanupSessionState() {
 		eventListener.stop();
 
-		if (vm != null) {
+		if (vm == null) {
+			breakpointTracker.reset();
+		} else {
 			try {
 				breakpointTracker.clearAll(vm.eventRequestManager());
 			} catch (Exception e) {
-				// VM may already be dead — fall back to in-memory reset
+				// "VM died mid-session" path — JDI calls would fail anyway, so we zero the in-memory
+				// state instead. The breakpoint requests will be GC'd along with the dead VM.
 				breakpointTracker.reset();
 			}
-		} else {
-			breakpointTracker.reset();
 		}
 
 		watcherManager.clearAll();
@@ -229,10 +258,18 @@ public class JDIConnectionService {
 	}
 
 	/**
-	 * Returns the fields of a cached object, or its elements if it is an array or collection.
+	 * Renders the fields/elements of a previously cached object. The rendering branches on type:
+	 * - Arrays: first 100 elements via {@link #getArrayElements}.
+	 * - Recognised `java.util` collections (`ArrayList`, `LinkedList`, `HashMap`, `LinkedHashMap`,
+	 *   `HashSet`, `TreeMap`, `TreeSet`): "smart view" with size, first 50 elements/entries, and the
+	 *   raw internal fields, via {@link #getCollectionView}.
+	 * - Anything else: a flat list of all fields (including inherited).
+	 *
+	 * Reads only — does not mutate target VM state. Relies on JDI's own thread-safety for
+	 * concurrent frame inspection.
 	 *
 	 * @param objectId unique ID of a previously cached {@link ObjectReference}
-	 * @return formatted string listing fields/elements, or an error message if the object is not in cache
+	 * @return formatted string listing fields/elements, or an `[ERROR]` message if the object is not in cache
 	 */
 	public synchronized String getObjectFields(long objectId) throws Exception {
 		ensureConnected();
@@ -283,20 +320,37 @@ public class JDIConnectionService {
 	}
 
 	/**
-	 * Check if type is a known collection
+	 * Allow-list of {@code java.util} collection types whose internal field layout is known and
+	 * stable enough for the smart-view rendering. Anything not on this list falls through to the
+	 * generic field dump in {@link #getObjectFields}.
 	 */
 	private boolean isCollection(String typeName) {
-		return typeName.startsWith("java.util.ArrayList") ||
-			   typeName.startsWith("java.util.LinkedList") ||
-			   typeName.startsWith("java.util.HashMap") ||
-			   typeName.startsWith("java.util.LinkedHashMap") ||
-			   typeName.startsWith("java.util.HashSet") ||
-			   typeName.startsWith("java.util.TreeSet") ||
-			   typeName.startsWith("java.util.TreeMap");
+		return collectionKind(typeName) != CollectionKind.UNKNOWN;
 	}
 
 	/**
-	 * Provide smart view for collections
+	 * Classifies a JDK collection type by its concrete class name. Uses explicit equality checks
+	 * rather than substring matching so future additions like {@code ConcurrentSkipListMap}
+	 * (which contains both "List" and "Map") cannot accidentally route to the wrong branch
+	 * (FINDING-13).
+	 */
+	private CollectionKind collectionKind(String typeName) {
+		return switch (typeName) {
+			case "java.util.ArrayList", "java.util.LinkedList" -> CollectionKind.LIST;
+			case "java.util.HashMap", "java.util.LinkedHashMap", "java.util.TreeMap" -> CollectionKind.MAP;
+			case "java.util.HashSet", "java.util.LinkedHashSet", "java.util.TreeSet" -> CollectionKind.SET;
+			default -> CollectionKind.UNKNOWN;
+		};
+	}
+
+	/** Smart-collection-view dispatch tag — see {@link #collectionKind(String)}. */
+	private enum CollectionKind { LIST, MAP, SET, UNKNOWN }
+
+	/**
+	 * Renders a "smart view" for one of the supported collection types: prints the {@code size}
+	 * field, dispatches to the type-specific element/entry walker, and then dumps the raw
+	 * internal fields for completeness. Dispatch is by exact-name classification via
+	 * {@link #collectionKind(String)}.
 	 */
 	private String getCollectionView(ObjectReference obj, long objectId, String typeName) {
 		StringBuilder result = new StringBuilder();
@@ -310,17 +364,11 @@ public class JDIConnectionService {
 				int size = ((IntegerValue) sizeValue).value();
 				result.append(String.format("Size: %d\n\n", size));
 
-				// For List types
-				if (typeName.contains("List")) {
-					result.append(getListElements(obj, size));
-				}
-				// For Map types
-				else if (typeName.contains("Map")) {
-					result.append(getMapEntries(obj, size));
-				}
-				// For Set types
-				else if (typeName.contains("Set")) {
-					result.append(getSetElements(obj, size));
+				switch (collectionKind(typeName)) {
+					case LIST -> result.append(getListElements(obj, size));
+					case MAP -> result.append(getMapEntries(obj, size));
+					case SET -> result.append(getSetElements(obj, size));
+					case UNKNOWN -> { /* allow-list filtered by isCollection — unreachable */ }
 				}
 			}
 
@@ -340,27 +388,55 @@ public class JDIConnectionService {
 		return result.toString();
 	}
 
+	/** Maximum number of entries/elements to render in any smart-collection view. */
+	private static final int COLLECTION_VIEW_LIMIT = 50;
+
 	/**
-	 * Get elements from a List (ArrayList, LinkedList)
+	 * Renders the first 50 elements of a List. Handles {@link java.util.ArrayList} via its internal
+	 * {@code elementData} Object[] and {@link java.util.LinkedList} via its {@code first}/{@code next}
+	 * node chain (reading each node's {@code item} field). Limited to 50 elements for performance
+	 * and human readability.
 	 */
 	private String getListElements(ObjectReference list, int size) {
-		StringBuilder result = new StringBuilder();
+		StringBuilder result = new StringBuilder(128);
 		result.append("Elements:\n");
 
 		try {
-			// ArrayList stores elements in an internal Object[] named "elementData" — this is a JDK implementation detail
+			// ArrayList stores elements in an internal Object[] named "elementData".
 			Field elementDataField = list.referenceType().fieldByName("elementData");
 			if (elementDataField != null) {
 				ArrayReference array = (ArrayReference) list.getValue(elementDataField);
 				if (array != null) {
-					int limit = Math.min(size, 50); // Limit to 50 elements
+					int limit = Math.min(size, COLLECTION_VIEW_LIMIT);
 					for (int i = 0; i < limit; i++) {
 						Value value = array.getValue(i);
 						result.append(String.format("  [%d] = %s\n", i, formatFieldValue(value)));
 					}
-					if (size > 50) {
-						result.append(String.format("  ... (%d more elements)\n", size - 50));
+					if (size > COLLECTION_VIEW_LIMIT) {
+						result.append(String.format("  ... (%d more elements)\n", size - COLLECTION_VIEW_LIMIT));
 					}
+					return result.toString();
+				}
+			}
+
+			// LinkedList stores elements in a "first" → "next" Node chain. Each Node has an "item" field.
+			Field firstField = list.referenceType().fieldByName("first");
+			if (firstField != null) {
+				ObjectReference node = (ObjectReference) list.getValue(firstField);
+				int index = 0;
+				while (node != null && index < COLLECTION_VIEW_LIMIT) {
+					Field itemField = node.referenceType().fieldByName("item");
+					if (itemField != null) {
+						Value item = node.getValue(itemField);
+						result.append(String.format("  [%d] = %s\n", index, formatFieldValue(item)));
+					}
+					Field nextField = node.referenceType().fieldByName("next");
+					if (nextField == null) break;
+					node = (ObjectReference) node.getValue(nextField);
+					index++;
+				}
+				if (size > COLLECTION_VIEW_LIMIT) {
+					result.append(String.format("  ... (%d more elements)\n", size - COLLECTION_VIEW_LIMIT));
 				}
 			}
 		} catch (Exception e) {
@@ -371,49 +447,71 @@ public class JDIConnectionService {
 	}
 
 	/**
-	 * Get entries from a Map (HashMap, LinkedHashMap, TreeMap)
+	 * Renders the first 50 entries of a Map. Handles three layouts:
+	 * <ul>
+	 *   <li>{@link java.util.LinkedHashMap} — walks the doubly-linked {@code head} → {@code after} chain.</li>
+	 *   <li>{@link java.util.HashMap} — walks the {@code table[]} bucket array following each
+	 *       {@code Node.next} chain.</li>
+	 *   <li>{@link java.util.TreeMap} — walks the red-black tree rooted at {@code root} via
+	 *       in-order {@code left}/{@code right} traversal.</li>
+	 * </ul>
+	 * Limited to 50 entries for performance.
 	 */
 	private String getMapEntries(ObjectReference map, int size) {
-		StringBuilder result = new StringBuilder();
+		StringBuilder result = new StringBuilder(256);
 		result.append("Entries:\n");
 
 		try {
-			// LinkedHashMap maintains a doubly-linked list via "head"/"after" fields for insertion-order iteration.
-			// Falls back to HashMap's "table"/"next" bucket chain. These are JDK-internal field names.
-			Field headField = map.referenceType().fieldByName("head");
+			ReferenceType mapType = map.referenceType();
+
+			// LinkedHashMap path: doubly-linked "head" → "after" insertion-order chain.
+			Field headField = mapType.fieldByName("head");
 			if (headField != null) {
 				ObjectReference entry = (ObjectReference) map.getValue(headField);
 				int count = 0;
-				int limit = 50;
-
-				while (entry != null && count < limit) {
-					// Get key and value from entry
-					Field keyField = entry.referenceType().fieldByName("key");
-					Field valueField = entry.referenceType().fieldByName("value");
-
-					if (keyField != null && valueField != null) {
-						Value key = entry.getValue(keyField);
-						Value value = entry.getValue(valueField);
-						result.append(String.format("  %s = %s\n",
-							formatFieldValue(key), formatFieldValue(value)));
-					}
-
-					// Move to next entry
+				while (entry != null && count < COLLECTION_VIEW_LIMIT) {
+					appendMapEntry(result, entry);
 					Field nextField = entry.referenceType().fieldByName("after");
 					if (nextField == null) {
 						nextField = entry.referenceType().fieldByName("next");
 					}
-					if (nextField != null) {
-						entry = (ObjectReference) entry.getValue(nextField);
-					} else {
-						break;
-					}
+					if (nextField == null) break;
+					entry = (ObjectReference) entry.getValue(nextField);
 					count++;
 				}
+				appendOverflowFooter(result, size, "entries");
+				return result.toString();
+			}
 
-				if (size > limit) {
-					result.append(String.format("  ... (%d more entries)\n", size - limit));
+			// HashMap path: table[] of Node buckets, each bucket is a "next" chain.
+			Field tableField = mapType.fieldByName("table");
+			if (tableField != null) {
+				ArrayReference table = (ArrayReference) map.getValue(tableField);
+				if (table != null) {
+					int rendered = 0;
+					int length = table.length();
+					for (int i = 0; i < length && rendered < COLLECTION_VIEW_LIMIT; i++) {
+						ObjectReference bucket = (ObjectReference) table.getValue(i);
+						while (bucket != null && rendered < COLLECTION_VIEW_LIMIT) {
+							appendMapEntry(result, bucket);
+							rendered++;
+							Field nextField = bucket.referenceType().fieldByName("next");
+							if (nextField == null) break;
+							bucket = (ObjectReference) bucket.getValue(nextField);
+						}
+					}
+					appendOverflowFooter(result, size, "entries");
+					return result.toString();
 				}
+			}
+
+			// TreeMap path: in-order traversal from "root" using "left"/"right" children.
+			Field rootField = mapType.fieldByName("root");
+			if (rootField != null) {
+				ObjectReference root = (ObjectReference) map.getValue(rootField);
+				int[] counter = new int[]{0};
+				walkTreeMapInOrder(root, counter, result);
+				appendOverflowFooter(result, size, "entries");
 			}
 		} catch (Exception e) {
 			result.append("  Error: ").append(e.getMessage()).append("\n");
@@ -423,19 +521,71 @@ public class JDIConnectionService {
 	}
 
 	/**
-	 * Get elements from a Set (HashSet, TreeSet)
+	 * In-order traversal of a TreeMap entry tree. Stops once {@link #COLLECTION_VIEW_LIMIT} entries
+	 * have been rendered to bound the output.
+	 */
+	private void walkTreeMapInOrder(ObjectReference node, int[] counter, StringBuilder out) {
+		if (node == null || counter[0] >= COLLECTION_VIEW_LIMIT) return;
+		ReferenceType type = node.referenceType();
+		Field leftField = type.fieldByName("left");
+		Field rightField = type.fieldByName("right");
+
+		if (leftField != null) {
+			ObjectReference left = (ObjectReference) node.getValue(leftField);
+			walkTreeMapInOrder(left, counter, out);
+		}
+		if (counter[0] >= COLLECTION_VIEW_LIMIT) return;
+
+		appendMapEntry(out, node);
+		counter[0]++;
+
+		if (rightField != null) {
+			ObjectReference right = (ObjectReference) node.getValue(rightField);
+			walkTreeMapInOrder(right, counter, out);
+		}
+	}
+
+	/** Appends a single {@code key = value} row to {@code out} for the given map entry node. */
+	private void appendMapEntry(StringBuilder out, ObjectReference entry) {
+		ReferenceType type = entry.referenceType();
+		Field keyField = type.fieldByName("key");
+		Field valueField = type.fieldByName("value");
+		if (keyField == null || valueField == null) return;
+		Value key = entry.getValue(keyField);
+		Value value = entry.getValue(valueField);
+		out.append(String.format("  %s = %s\n", formatFieldValue(key), formatFieldValue(value)));
+	}
+
+	/**
+	 * Appends a {@code "... (N more …)"} footer when the collection's reported size exceeds the
+	 * smart-view limit. {@code label} is typically {@code "entries"} or {@code "elements"}.
+	 */
+	private void appendOverflowFooter(StringBuilder out, int size, String label) {
+		if (size > COLLECTION_VIEW_LIMIT) {
+			out.append(String.format("  ... (%d more %s)\n", size - COLLECTION_VIEW_LIMIT, label));
+		}
+	}
+
+	/**
+	 * Renders the elements of a Set by following its internal backing-map field. {@link java.util.HashSet}
+	 * uses {@code map}; {@link java.util.TreeSet} uses {@code m}. Once the backing map is located the
+	 * set elements are read from its keys via {@link #getMapEntries}.
 	 */
 	private String getSetElements(ObjectReference set, int size) {
-		StringBuilder result = new StringBuilder();
+		StringBuilder result = new StringBuilder(128);
 		result.append("Elements:\n");
 
 		try {
-			// HashSet delegates to an internal HashMap stored in a field named "map" — JDK implementation detail
+			// HashSet delegates to an internal HashMap stored in a field named "map".
+			// TreeSet delegates to a TreeMap stored in a field named "m" (single letter).
 			Field mapField = set.referenceType().fieldByName("map");
+			if (mapField == null) {
+				mapField = set.referenceType().fieldByName("m");
+			}
 			if (mapField != null) {
 				ObjectReference map = (ObjectReference) set.getValue(mapField);
 				if (map != null) {
-					// Extract keys from the map (values are dummy PRESENT objects)
+					// Extract keys from the map (values are dummy PRESENT objects for HashSet).
 					result.append(getMapEntries(map, size));
 				}
 			}
@@ -447,7 +597,8 @@ public class JDIConnectionService {
 	}
 
 	/**
-	 * Get elements of an array
+	 * Renders the first 100 elements of a JDI array reference. Limit is hardcoded to keep responses
+	 * bounded for the MCP client; longer arrays are summarised with a "more elements" footer.
 	 */
 	private String getArrayElements(ArrayReference array, long arrayId) {
 		StringBuilder result = new StringBuilder();
@@ -531,6 +682,11 @@ public class JDIConnectionService {
 		return null;
 	}
 
+	/** Names of the eight Java primitive wrapper types — gates {@link #tryUnboxPrimitive} fast-path. */
+	private static final Set<String> BOXED_PRIMITIVE_TYPES = Set.of(
+		"java.lang.Integer", "java.lang.Long", "java.lang.Double", "java.lang.Float",
+		"java.lang.Boolean", "java.lang.Character", "java.lang.Byte", "java.lang.Short");
+
 	/**
 	 * Pure type-name check for the eight Java primitive wrapper classes. Extracted as a separate
 	 * static so it can be unit-tested without a {@link ObjectReference}.
@@ -540,17 +696,21 @@ public class JDIConnectionService {
 	}
 
 	/**
-	 * Discover the full classpath of the target JVM by exploring its classloader hierarchy.
-	 * Results are cached after first call.
+	 * Discovers and caches the full classpath of the target JVM, including JARs loaded dynamically
+	 * by Tomcat / container classloaders that don't appear in `java.class.path`. Result is cached
+	 * after the first successful call and reused until {@link #cleanupSessionState}.
 	 *
-	 * This method explores the context classloader hierarchy to find all dynamically loaded JARs,
-	 * which is essential for Tomcat/container applications where most JARs are not in java.class.path.
+	 * Side effects: also populates {@link #discoveredJdkPath} and {@link #targetMajorVersion} via
+	 * {@link io.mcp.jdwp.evaluation.JdkDiscoveryService} so the JDT compiler can be configured.
 	 *
-	 * MUST be called with a thread that is already suspended at a breakpoint.
-	 * This ensures the thread is in a compatible state for INVOKE_SINGLE_THREADED.
+	 * Returns `null` (and logs at error level) on any failure, including when no matching local JDK
+	 * can be found — the {@link io.mcp.jdwp.evaluation.JdkDiscoveryService.JdkNotFoundException} is
+	 * caught here and never bubbles out.
 	 *
-	 * @param suspendedThread A thread already suspended at a breakpoint (REQUIRED)
-	 * @return Classpath string (colon or semicolon separated depending on OS), or null if unavailable
+	 * @param suspendedThread thread already suspended at a JDI method-invocation event (breakpoint
+	 *                        or step); plain `vm.suspend()` is not enough because the discovery uses
+	 *                        `INVOKE_SINGLE_THREADED` which requires a usable invocation thread
+	 * @return classpath string (separator inferred from the first entry), or `null` on any failure
 	 */
 	public String discoverClasspath(ThreadReference suspendedThread) {
 		if (cachedClasspath != null) {
@@ -721,6 +881,10 @@ public class JDIConnectionService {
 		}
 	}
 
+	/**
+	 * Defensive frame count probe — returns `-1` if the thread is in a state where `frameCount()`
+	 * throws (e.g., not suspended, or suspended in a state JDI cannot inspect).
+	 */
 	private int tryFrameCount(ThreadReference thread) {
 		try {
 			return thread.frameCount();
@@ -729,6 +893,11 @@ public class JDIConnectionService {
 		}
 	}
 
+	/**
+	 * Checks whether a thread satisfies JDI's preconditions for `invokeMethod`: must be suspended
+	 * AND have at least one stack frame. JDI rejects invocations on threads suspended via
+	 * `vm.suspend()` (no frames yet) or threads suspended in native waits.
+	 */
 	private boolean isUsableForInvoke(ThreadReference t) {
 		try {
 			return t.isSuspended() && t.frameCount() > 0;
@@ -737,6 +906,14 @@ public class JDIConnectionService {
 		}
 	}
 
+	/**
+	 * Picks any thread suitable for JDI `invokeMethod` (force-load, watcher evaluation, classpath
+	 * discovery). Two-step fallback:
+	 * 1. The thread that most recently fired a suspending event (recorded by {@link BreakpointTracker});
+	 *    this is the preferred choice because it's known to be at a JDI method-invocation event.
+	 * 2. Any other suspended thread with frames, excluding JVM-internal threads (Reference Handler,
+	 *    Finalizer, etc.) which are suspended in native waits and would fail JDI's invoke check.
+	 */
 	private ThreadReference findSuspendedThread() {
 		if (vm == null) return null;
 		try {
@@ -755,10 +932,6 @@ public class JDIConnectionService {
 		} catch (Exception e) {
 			return null;
 		}
-	}
-
-	private boolean isJvmInternalThread(ThreadReference t) {
-		return ThreadFormatting.isJvmInternalThread(t);
 	}
 
 }

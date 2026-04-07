@@ -16,10 +16,28 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Listens to the JDI event queue on a daemon thread.
- * Updates BreakpointTracker when breakpoint events arrive.
- * Activates deferred breakpoints when ClassPrepareEvents fire.
- * Evaluates conditional breakpoints and logpoints automatically.
+ * Drains the JDI event queue on a dedicated daemon thread named `jdi-event-listener`. The MCP
+ * server MUST consume every event the target VM emits — JDI blocks the target on a full event
+ * queue, so this listener has to keep up.
+ *
+ * Per-event behaviour:
+ * - `BreakpointEvent` → record to {@link EventHistory}, update {@link BreakpointTracker#setLastBreakpointThread},
+ *   fire the resume-until-event latch, and KEEP the thread suspended (auto-resume only for logpoints
+ *   and false conditional breakpoints).
+ * - `StepEvent` → delete the one-shot StepRequest (JDI requirement), record, fire the latch.
+ * - `ExceptionEvent` → record with throw/catch metadata, set `lastBreakpointThread` with sentinel
+ *   BP id `-1`, fire the latch.
+ * - `ClassPrepareEvent` → promote pending line and exception breakpoints for the loaded class.
+ * - `VMStartEvent` → keep the VM suspended so the user can finish wiring up breakpoints.
+ * - `VMDisconnectEvent` / `VMDeathEvent` → exit the loop.
+ *
+ * Promotion contract: the main listener loop does not call
+ * {@link BreakpointTracker#tryPromotePending(JDIConnectionService, ThreadReference)} directly —
+ * promotion happens lazily via {@link JDIConnectionService#getVM()} on the next MCP tool call.
+ * Logpoint and conditional-BP handlers DO end up calling it indirectly the first time after
+ * connect (via {@code configureCompilerClasspath} → {@code discoverClasspath} → {@code getVM}),
+ * which is safe because the BP thread is already suspended at a method-invocation event —
+ * JDI permits {@code invokeMethod} on threads in that state.
  */
 @Slf4j
 @Service
@@ -28,7 +46,9 @@ public class JdiEventListener {
 	private final BreakpointTracker breakpointTracker;
 	private final EventHistory eventHistory;
 	private final JdiExpressionEvaluator expressionEvaluator;
+	/** Daemon thread running {@link #listen}; replaced on each {@link #start}, nulled by {@link #stop}. */
 	private volatile Thread listenerThread;
+	/** Loop control flag; flipped to false by {@link #stop} or by VM disconnect/death events. */
 	private volatile boolean running;
 
 	public JdiEventListener(BreakpointTracker breakpointTracker, EventHistory eventHistory,
@@ -39,8 +59,8 @@ public class JdiEventListener {
 	}
 
 	/**
-	 * Start listening for JDI events from the given VM.
-	 * Spawns a daemon thread that polls the event queue.
+	 * Spawns a fresh daemon listener thread for `vm`. Calls {@link #stop()} first so there is at
+	 * most one listener active at any time. The thread is a daemon — it does not block JVM shutdown.
 	 */
 	public void start(VirtualMachine vm) {
 		stop(); // clean up any previous listener
@@ -53,7 +73,8 @@ public class JdiEventListener {
 	}
 
 	/**
-	 * Stop the event listener thread.
+	 * Best-effort interrupt of the listener thread. The {@link #listen} loop exits on
+	 * `VMDisconnectedException`, an `InterruptedException`, or {@link #running} becoming false.
 	 */
 	public void stop() {
 		running = false;
@@ -64,8 +85,11 @@ public class JdiEventListener {
 	}
 
 	/**
-	 * Main event loop. Events that require user inspection (breakpoints, steps, exceptions)
-	 * keep the thread suspended. Logpoints and false conditions auto-resume.
+	 * Main event loop. Events that require user inspection (breakpoints, steps, exceptions) cause
+	 * the entire `EventSet` to stay suspended; logpoints and false conditional breakpoints reach
+	 * the bottom of the loop with `shouldSuspend == false` and the set is `eventSet.resume()`d.
+	 * Note that `resume()` is only called when NO event in the set demanded suspension — even one
+	 * suspending event keeps every thread in the set parked for user inspection.
 	 */
 	private void listen(VirtualMachine vm) {
 		EventQueue queue = vm.eventQueue();
@@ -95,6 +119,9 @@ public class JdiEventListener {
 					} else if (event instanceof VMDisconnectEvent || event instanceof VMDeathEvent) {
 						log.info("[JDI] VM disconnected/died, stopping event listener");
 						eventHistory.record(new EventHistory.DebugEvent("VM_DEATH", "VM disconnected/died"));
+						// Wake any caller parked on jdwp_resume_until_event so they detect the dead
+						// VM promptly instead of timing out (FINDING-7).
+						breakpointTracker.fireNextEvent();
 						running = false;
 						return;
 					}
@@ -103,16 +130,20 @@ public class JdiEventListener {
 				if (!shouldSuspend) {
 					eventSet.resume();
 				}
-				// NOTE: We deliberately do NOT call tryPromotePending from inside the event
-				// listener thread. JDI forbids method invocations from within event handlers,
-				// which would block the listener and crash the connection. Promotion happens via
-				// JDIConnectionService.getVM() on the next MCP tool call, where invokeMethod is
-				// safe because the listener is back at queue.remove().
+				// NOTE: the main loop does not call tryPromotePending directly — promotion is
+				// deferred to JDIConnectionService.getVM() on the next MCP tool call. Logpoint
+				// and conditional-BP handlers DO end up invoking it indirectly the first time
+				// after connect (configureCompilerClasspath → discoverClasspath → getVM →
+				// tryPromotePending), which is safe because the BP thread is suspended at a
+				// method-invocation event — JDI permits invokeMethod in that state.
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
 				break;
 			} catch (com.sun.jdi.VMDisconnectedException e) {
 				log.info("[JDI] VM disconnected, stopping event listener");
+				// Wake any caller parked on jdwp_resume_until_event so they detect the dead VM
+				// promptly instead of timing out (FINDING-7).
+				breakpointTracker.fireNextEvent();
 				break;
 			} catch (Exception e) {
 				if (running) {
@@ -123,9 +154,16 @@ public class JdiEventListener {
 	}
 
 	/**
-	 * Handles a breakpoint event. Returns true if the thread should stay suspended.
-	 * Returns false for logpoints (auto-resume after evaluation) and conditional breakpoints
-	 * where the condition evaluates to false.
+	 * Dispatches a breakpoint hit and returns whether the thread should remain suspended.
+	 *
+	 * Auto-resume cases (returns `false`):
+	 * 1. Logpoint — expression is evaluated and recorded; the thread continues without notifying the user.
+	 * 2. Conditional breakpoint with `condition == false` (the fail-safe path is in {@link #evaluateCondition}).
+	 *
+	 * Suspending cases (returns `true`):
+	 * - Untracked breakpoints (defensive — shouldn't happen but we err on the side of inspection).
+	 * - Plain breakpoints with no condition or with a true condition.
+	 * - Any internal error during evaluation.
 	 */
 	private boolean handleBreakpointEvent(BreakpointEvent event) {
 		try {
@@ -144,15 +182,22 @@ public class JdiEventListener {
 			int lineNumber = event.location().lineNumber();
 			String threadName = event.thread().name();
 
-			// Check if this is a logpoint — evaluate expression, record output, auto-resume
 			String logpointExpr = breakpointTracker.getLogpointExpression(bpId);
+			String condition = breakpointTracker.getCondition(bpId);
+
+			// Check if this is a logpoint — evaluate expression, record output, auto-resume.
+			// If a condition is also set, evaluate it first and skip logging when false.
 			if (logpointExpr != null) {
+				if (condition != null && !evaluateCondition(event, condition)) {
+					log.debug("[JDI] Conditional logpoint {} at {}:{} — condition false, skipping",
+						bpId, className, lineNumber);
+					return false;
+				}
 				evaluateLogpoint(event, bpId, logpointExpr, className, lineNumber, threadName);
 				return false;
 			}
 
 			// Check if this has a condition — evaluate and resume if false
-			String condition = breakpointTracker.getCondition(bpId);
 			if (condition != null) {
 				boolean conditionResult = evaluateCondition(event, condition);
 				if (!conditionResult) {
@@ -178,7 +223,15 @@ public class JdiEventListener {
 		}
 	}
 
+	/**
+	 * Handles a single-step event by deleting the one-shot {@link com.sun.jdi.request.StepRequest}
+	 * (JDI convention — step requests are consumed after firing), recording a `STEP` event in
+	 * {@link EventHistory}, and firing the resume-until-event latch so a waiting `jdwp_resume_until_event`
+	 * call can return.
+	 */
 	private void handleStepEvent(StepEvent event) {
+		// Some legacy JDI providers deliver step events with a null request reference (already
+		// auto-removed by the provider) — guard before calling deleteEventRequest.
 		if (event.request() != null) {
 			event.request().virtualMachine().eventRequestManager().deleteEventRequest(event.request());
 		}
@@ -197,6 +250,12 @@ public class JdiEventListener {
 		}
 	}
 
+	/**
+	 * Handles a JDI exception event by recording an `EXCEPTION` entry with throw/catch location
+	 * metadata and routing the firing thread through {@link BreakpointTracker#setLastBreakpointThread}
+	 * with the sentinel BP id `-1`. The sentinel lets `jdwp_get_current_thread` and the
+	 * `findSuspendedThread` fallback locate the thread without needing a real breakpoint id.
+	 */
 	private void handleExceptionEvent(ExceptionEvent event) {
 		try {
 			ObjectReference exception = event.exception();
@@ -226,6 +285,15 @@ public class JdiEventListener {
 		}
 	}
 
+	/**
+	 * Evaluates the logpoint expression and records a `LOGPOINT` (or `LOGPOINT_ERROR`) entry. Runs
+	 * on the JDI listener thread; this is safe because we're inside a synchronously-dispatched
+	 * event handler — JDI's prohibition on `invokeMethod` applies to event-dispatch callbacks, not
+	 * to method invocations made while the listener thread is processing a drained event.
+	 *
+	 * Never throws — any evaluation failure is captured as a `LOGPOINT_ERROR` entry so the user
+	 * sees the failure in `jdwp_get_events` instead of a silently dropped event.
+	 */
 	private void evaluateLogpoint(BreakpointEvent event, int bpId, String expression,
 								  String className, int lineNumber, String threadName) {
 		try {
@@ -250,6 +318,13 @@ public class JdiEventListener {
 		}
 	}
 
+	/**
+	 * Evaluates a conditional breakpoint expression at frame 0. Fail-safe policy: any error
+	 * (compilation failure, non-boolean result, exception during execution) returns `true` so the
+	 * user sees the breakpoint hit and can investigate the problem rather than silently skipping
+	 * the BP. Recognises both primitive `BooleanValue` and the boxed `java.lang.Boolean` returned
+	 * via the wrapper class's `(Object)(...)` autoboxing cast.
+	 */
 	private boolean evaluateCondition(BreakpointEvent event, String condition) {
 		try {
 			ThreadReference thread = event.thread();
@@ -282,6 +357,12 @@ public class JdiEventListener {
 		}
 	}
 
+	/**
+	 * Formats a JDI value for the human-readable logpoint output. Mirrors the format used by
+	 * {@link JDIConnectionService#formatFieldValue} but without its side effects (no object cache
+	 * insertion, no primitive unboxing) — logpoint output only needs to be a string for the event
+	 * history, so the simpler implementation is preferred.
+	 */
 	private String formatLogpointResult(Value value) {
 		if (value == null) return "null";
 		if (value instanceof StringReference strRef) return strRef.value();
@@ -293,7 +374,10 @@ public class JdiEventListener {
 	}
 
 	/**
-	 * Activates deferred (pending) breakpoints when the target class is loaded by the JVM.
+	 * Promotes pending line breakpoints AND pending exception breakpoints for the freshly loaded
+	 * class. After promotion, deletes the {@link ClassPrepareRequest} for this class if no other
+	 * pending items still reference it — keeping a stale CPR around would deliver duplicate events
+	 * for unrelated classes that happen to share the same name pattern.
 	 */
 	private void handleClassPrepareEvent(ClassPrepareEvent event) {
 		try {

@@ -3,9 +3,13 @@ package io.mcp.jdwp.watchers;
 import java.util.UUID;
 
 /**
- * Represents a watcher attached to a breakpoint for expression evaluation.
- * Watchers are identified by a unique UUID and can have a descriptive label.
- * Each watcher evaluates a single Java expression.
+ * Immutable model for a watcher attached to a breakpoint. Watchers are MCP-side only — they are
+ * NOT JDI requests; they live in {@link WatcherManager} and are evaluated on demand by
+ * `jdwp_evaluate_watchers` whenever the parent breakpoint hits.
+ *
+ * The `id` is a freshly-generated random UUID; watchers do NOT survive MCP server restarts because
+ * the IDs aren't persisted anywhere. Each watcher carries a single Java expression evaluated by
+ * {@link io.mcp.jdwp.evaluation.JdiExpressionEvaluator} against the breakpoint's stack frame.
  */
 public class Watcher {
 	private final String id;

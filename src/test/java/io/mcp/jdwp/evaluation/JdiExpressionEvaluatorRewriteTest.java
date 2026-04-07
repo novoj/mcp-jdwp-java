@@ -279,4 +279,106 @@ class JdiExpressionEvaluatorRewriteTest {
 
 		assertThat(result).isEqualTo("\"name\" + 'n' + _this.name");
 	}
+
+	// ── rewriteThisKeyword: bare `this` → `_this`, tokenizer-aware ───────────────────────
+
+	@Test
+	@DisplayName("rewriteThisKeyword: rewrites a bare `this` to `_this`")
+	void shouldRewriteBareThisKeyword() {
+		String result = JdiExpressionEvaluator.rewriteThisKeyword("this");
+
+		assertThat(result).isEqualTo("_this");
+	}
+
+	@Test
+	@DisplayName("rewriteThisKeyword: rewrites `this.foo` to `_this.foo`")
+	void shouldRewriteThisDotFoo() {
+		String result = JdiExpressionEvaluator.rewriteThisKeyword("this.foo");
+
+		assertThat(result).isEqualTo("_this.foo");
+	}
+
+	@Test
+	@DisplayName("rewriteThisKeyword: rewrites multiple bare `this` references")
+	void shouldRewriteMultipleBareThis() {
+		String result = JdiExpressionEvaluator.rewriteThisKeyword("this == null || this.foo > 0");
+
+		assertThat(result).isEqualTo("_this == null || _this.foo > 0");
+	}
+
+	@Test
+	@DisplayName("rewriteThisKeyword: does NOT rewrite identifiers that contain `this` as a substring")
+	void shouldNotRewriteSubstringMatchOfThis() {
+		String result = JdiExpressionEvaluator.rewriteThisKeyword("myThis + thisFoo + barThis");
+
+		assertThat(result).isEqualTo("myThis + thisFoo + barThis");
+	}
+
+	@Test
+	@DisplayName("rewriteThisKeyword: does NOT rewrite `this` inside a string literal")
+	void shouldNotRewriteThisInsideStringLiteral() {
+		// FINDING: simplifier flagged the original naive `replaceAll` as corrupting this case.
+		String result = JdiExpressionEvaluator.rewriteThisKeyword("\"this is a test\" + this");
+
+		assertThat(result).isEqualTo("\"this is a test\" + _this");
+	}
+
+	@Test
+	@DisplayName("rewriteThisKeyword: does NOT rewrite `this` inside a char literal sequence")
+	void shouldNotRewriteThisInsideCharContext() {
+		// 't' is a char literal — the tokenizer must skip past it without rewriting the
+		// surrounding `this` token... wait, the literal does not contain `this`. Use a
+		// pathological char literal that LOOKS like the start of `this`.
+		String result = JdiExpressionEvaluator.rewriteThisKeyword("'t' + this");
+
+		assertThat(result).isEqualTo("'t' + _this");
+	}
+
+	@Test
+	@DisplayName("rewriteThisKeyword: does NOT rewrite `this` inside a string with escapes")
+	void shouldNotRewriteThisInsideStringWithEscapes() {
+		String result = JdiExpressionEvaluator.rewriteThisKeyword(
+			"\"prefix=\\\"this\\\" suffix\" + this");
+
+		assertThat(result).isEqualTo("\"prefix=\\\"this\\\" suffix\" + _this");
+	}
+
+	@Test
+	@DisplayName("rewriteThisKeyword: does NOT rewrite `this` inside a Java text block")
+	void shouldNotRewriteThisInsideTextBlock() {
+		String input = "\"\"\"\nthis is a multiline\nthis literal\n\"\"\" + this";
+
+		String result = JdiExpressionEvaluator.rewriteThisKeyword(input);
+
+		assertThat(result).isEqualTo("\"\"\"\nthis is a multiline\nthis literal\n\"\"\" + _this");
+	}
+
+	@Test
+	@DisplayName("rewriteThisKeyword: returns the input unchanged when no `this` token is present")
+	void shouldReturnUnchangedWhenNoThis() {
+		String input = "foo + bar.baz()";
+
+		String result = JdiExpressionEvaluator.rewriteThisKeyword(input);
+
+		assertThat(result).isEqualTo("foo + bar.baz()");
+	}
+
+	@Test
+	@DisplayName("rewriteThisKeyword: handles bare `this` adjacent to operators")
+	void shouldRewriteThisAdjacentToOperators() {
+		String result = JdiExpressionEvaluator.rewriteThisKeyword("(this)+(this)");
+
+		assertThat(result).isEqualTo("(_this)+(_this)");
+	}
+
+	@Test
+	@DisplayName("rewriteThisKeyword: tolerates an unterminated string literal without throwing")
+	void shouldTolerateUnterminatedStringInThisKeyword() {
+		String input = "this + \"unterminated";
+
+		String result = JdiExpressionEvaluator.rewriteThisKeyword(input);
+
+		// The bare `this` before the literal should still be rewritten
+		assertThat(result).isEqualTo("_this + \"unterminated");
+	}
 }

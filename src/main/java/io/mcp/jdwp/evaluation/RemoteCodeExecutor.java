@@ -9,13 +9,26 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Handles the remote execution of compiled Java code in a target JVM via JDI.
+ * Injects compiled bytecode into a target JVM and invokes a static method on the resulting class.
+ *
+ * Three-phase execution per call to {@link #execute}:
+ * 1. {@link #loadClass} — calls `ClassLoader.defineClass(name, bytes, 0, len)` in the target VM
+ *    via JDI to define the class. Idempotent: a `vm.classesByName(name)` check at the top of
+ *    `loadClass` returns any existing definition unchanged, which is what makes the
+ *    {@link JdiExpressionEvaluator}'s compilation cache safe to reuse across calls with the same
+ *    class name.
+ * 2. {@link #forceClassInitialization} — calls `Class.forName(name, true, classLoader)` so the
+ *    class is fully prepared and initialized before we look up its methods. Without this,
+ *    `methodsByName()` may return empty for a defined-but-not-prepared class.
+ * 3. Looks up the static method by name and invokes it with `INVOKE_SINGLE_THREADED`.
  */
 @Slf4j
 @Service
 public class RemoteCodeExecutor {
 
+	/** JDI method name for `ClassLoader.defineClass`. */
 	private static final String CLASSLOADER_DEFINE_CLASS_METHOD = "defineClass";
+	/** JNI signature for the four-argument `defineClass(String, byte[], int, int)` overload. */
 	private static final String CLASSLOADER_DEFINE_CLASS_SIGNATURE = "(Ljava/lang/String;[BII)Ljava/lang/Class;";
 
 	/**
@@ -86,6 +99,11 @@ public class RemoteCodeExecutor {
 		}
 	}
 
+	/**
+	 * Defines `bytecode` as `className` in the target VM via the supplied classloader. Idempotent:
+	 * if the class is already loaded (cached compilation reuse), the existing definition is
+	 * returned unchanged — calling `defineClass` twice would throw `LinkageError`.
+	 */
 	private ClassType loadClass(VirtualMachine vm, ThreadReference thread, ClassLoaderReference classLoader,
 								String className, byte[] bytecode) throws JdiEvaluationException {
 		// Cached compilations reuse the same class name across calls — if the class
@@ -149,6 +167,13 @@ public class RemoteCodeExecutor {
 		}
 	}
 
+	/**
+	 * Mirrors a JVM-local `byte[]` into the target VM by allocating a fresh array of the same length
+	 * and populating it element-by-element via {@link VirtualMachine#mirrorOf(byte)}. Cost is
+	 * O(bytecode.length) JDWP round-trips for the per-byte mirror calls — expensive for large
+	 * bytecode but unavoidable without cooperating native code in the target VM, since
+	 * {@link ArrayReference#setValues} requires already-mirrored values.
+	 */
 	private ArrayReference createRemoteByteArray(VirtualMachine vm, byte[] bytes) throws JdiEvaluationException {
 		try {
 			log.debug("[Executor] Creating remote byte array of {} bytes", bytes.length);
@@ -158,7 +183,9 @@ public class RemoteCodeExecutor {
 			// Create a new instance of byte[] in the target VM
 			ArrayReference arrayRef = byteArrayType.newInstance(bytes.length);
 
-			// To set the values, we need to create a List<Value> of ByteValue mirrors
+			// To set the values, we need to create a List<Value> of ByteValue mirrors. The per-byte
+			// mirrorOf call is the dominant cost here — batching happens at the setValues call below
+			// but the values themselves still have to round-trip individually.
 			List<Value> mirrorBytes = new ArrayList<>(bytes.length);
 			for (byte b : bytes) {
 				mirrorBytes.add(vm.mirrorOf(b));
@@ -176,8 +203,11 @@ public class RemoteCodeExecutor {
 	}
 
 	/**
-	 * Forces class initialization by invoking Class.forName(className, true, classLoader) in the target VM.
-	 * This ensures the class goes through preparation and initialization before we call methodsByName().
+	 * Forces class initialization by invoking `Class.forName(className, true, classLoader)` in the
+	 * target VM. Necessary because `methodsByName()` returns empty (or throws) on a class that has
+	 * been defined but not yet prepared/initialized. An exception thrown by the class's `<clinit>`
+	 * bubbles up as an `InvocationException` and is wrapped into {@link JdiEvaluationException}
+	 * with the original exception type in the message.
 	 */
 	private void forceClassInitialization(VirtualMachine vm, ThreadReference thread,
 										 ClassLoaderReference classLoader, String className) throws JdiEvaluationException {

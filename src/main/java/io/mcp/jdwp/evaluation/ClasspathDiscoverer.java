@@ -8,11 +8,22 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 /**
- * Discovers the full classpath of a target JVM by exploring its classloader hierarchy.
- * This is necessary for Tomcat/container applications where most JARs are loaded dynamically
- * via custom classloaders and are not visible in the initial java.class.path system property.
+ * Discovers the full classpath of a target JVM by exploring its classloader hierarchy. Necessary
+ * for Tomcat / container applications where most JARs are loaded dynamically via custom
+ * classloaders and are not visible in the initial `java.class.path` system property.
  *
- * This is NOT a Spring bean - it is instantiated manually with a VirtualMachine instance.
+ * NOT a Spring bean — instantiated manually by {@link io.mcp.jdwp.JDIConnectionService} with a
+ * `VirtualMachine` instance per discovery call. The result is cached on the connection service.
+ *
+ * Discovery aggregates entries from three sources, in order:
+ * 1. The target VM's `java.class.path` system property.
+ * 2. The chain of `URLClassLoader` instances reachable from the suspended thread's context
+ *    classloader (via `getURLs()` invocations).
+ * 3. Tomcat `WebappClassLoaderBase` instances detected the same way.
+ *
+ * Discovery aborts with {@link JdkDiscoveryService.JdkNotFoundException} if no local JDK matching
+ * the target version is found via {@link JdkDiscoveryService} — JDT requires `--system <jdkPath>`
+ * to compile against the target's system classes.
  */
 @Slf4j
 public class ClasspathDiscoverer {
@@ -24,15 +35,14 @@ public class ClasspathDiscoverer {
 	}
 
 	/**
-	 * Discovers the full classpath by exploring the classloader hierarchy starting from
-	 * the thread's context classloader.
+	 * Runs the full discovery sequence: locates a matching local JDK first (fail-fast), then walks
+	 * the suspended thread's context classloader chain collecting JAR entries from each
+	 * URL-capable classloader. The thread MUST already be suspended at a JDI method-invocation
+	 * event so the in-VM `invokeMethod` calls succeed.
 	 *
-	 * CRITICAL: This method first discovers a matching local JDK installation. If no JDK is found,
-	 * it throws JdkNotFoundException. Expression evaluation cannot proceed without a local JDK.
-	 *
-	 * @param suspendedThread A thread already suspended at a breakpoint
-	 * @return DiscoveryResult containing local JDK path and application classpath
-	 * @throws JdkDiscoveryService.JdkNotFoundException if no matching JDK is found locally
+	 * @param suspendedThread thread suspended at a breakpoint, step, or class-prepare event
+	 * @return discovery result with local JDK path and the aggregated application classpath set
+	 * @throws JdkDiscoveryService.JdkNotFoundException if no matching local JDK installation can be found
 	 */
 	public DiscoveryResult discoverFullClasspath(ThreadReference suspendedThread)
 			throws JdkDiscoveryService.JdkNotFoundException {
@@ -72,9 +82,10 @@ public class ClasspathDiscoverer {
 				log.debug("[Discoverer] Inspecting ClassLoader: {}", clType.name());
 
 				// Try to extract URLs from this classloader
-				if (urlClassLoaderClass != null && isAssignableTo(clType, urlClassLoaderClass)) {
-					extractUrlsFromClassLoader(currentClassLoader, suspendedThread, classpathEntries);
-				} else if (webappClassLoaderBaseClass != null && isAssignableTo(clType, webappClassLoaderBaseClass)) {
+				boolean isUrlClassLoader = urlClassLoaderClass != null && isAssignableTo(clType, urlClassLoaderClass);
+				boolean isWebappClassLoader = webappClassLoaderBaseClass != null
+					&& isAssignableTo(clType, webappClassLoaderBaseClass);
+				if (isUrlClassLoader || isWebappClassLoader) {
 					extractUrlsFromClassLoader(currentClassLoader, suspendedThread, classpathEntries);
 				} else {
 					log.debug("[Discoverer] ClassLoader {} is not a recognized URL-based classloader", clType.name());
@@ -89,10 +100,11 @@ public class ClasspathDiscoverer {
 
 			return new DiscoveryResult(localJdkPath, classpathEntries, jdkDiscovery.getTargetMajorVersion());
 
-		} catch (JdkDiscoveryService.JdkNotFoundException e) {
-			// Propagate JDK not found exception - this is a critical error
-			throw e;
 		} catch (Exception e) {
+			if (e instanceof JdkDiscoveryService.JdkNotFoundException jnf) {
+				// Propagate JDK not found exception - this is a critical error
+				throw jnf;
+			}
 			long elapsed = System.currentTimeMillis() - startTime;
 			log.error("[Discoverer] Error discovering full classpath after {}ms", elapsed, e);
 			throw new RuntimeException("Classpath discovery failed: " + e.getMessage(), e);
@@ -100,7 +112,10 @@ public class ClasspathDiscoverer {
 	}
 
 	/**
-	 * Result of classpath discovery containing both JDK path and application classpath.
+	 * Result of classpath discovery containing both JDK path and application classpath. The
+	 * `applicationClasspath` is an insertion-ordered {@link LinkedHashSet} preserving the
+	 * classloader-traversal order so the eventual classpath string keeps the parent-first
+	 * resolution semantics that JDT expects.
 	 */
 	public static class DiscoveryResult {
 		private final String localJdkPath;
@@ -126,6 +141,11 @@ public class ClasspathDiscoverer {
 		}
 	}
 
+	/**
+	 * Invokes `System.getProperty("java.class.path")` in the target VM via `INVOKE_SINGLE_THREADED`
+	 * and adds each parsed entry to `classpathEntries`. Failures are logged and swallowed because
+	 * the follow-up classloader traversal usually fills in the missing entries anyway.
+	 */
 	private void addInitialClasspath(ThreadReference suspendedThread, Set<String> classpathEntries) {
 		try {
 			ClassType systemClass = (ClassType) vm.classesByName("java.lang.System").get(0);
@@ -141,7 +161,8 @@ public class ClasspathDiscoverer {
 			if (result instanceof StringReference stringRef) {
 				String initialClasspath = stringRef.value();
 				if (initialClasspath != null && !initialClasspath.isEmpty()) {
-					// Detect path separator from target OS (use semicolon for Windows, colon for Unix)
+					// Target-OS heuristic: presence of `;` implies Windows, otherwise assume Unix.
+					// May be wrong on hybrid Cygwin/WSL setups where both separators appear.
 					String separator = initialClasspath.contains(";") ? ";" : ":";
 					String[] entries = initialClasspath.split(separator);
 					for (String entry : entries) {
@@ -157,6 +178,11 @@ public class ClasspathDiscoverer {
 		}
 	}
 
+	/**
+	 * Invokes `Thread.getContextClassLoader()` on the suspended thread to obtain its context
+	 * classloader. Returns `null` on any error so the caller can fall back to the initial classpath
+	 * only.
+	 */
 	private ClassLoaderReference getContextClassLoader(ThreadReference suspendedThread) {
 		try {
 			Method getContextClassLoaderMethod = suspendedThread.referenceType()
@@ -176,6 +202,12 @@ public class ClasspathDiscoverer {
 		}
 	}
 
+	/**
+	 * Looks up a {@link ClassType} by name in the target VM, returning `null` instead of throwing
+	 * when the class isn't visible. Used to optionally probe for classloader types like
+	 * `java.net.URLClassLoader` and `org.apache.catalina.loader.WebappClassLoaderBase` that may or
+	 * may not be present.
+	 */
 	private ClassType getClassTypeSafe(String className) {
 		try {
 			List<ReferenceType> classes = vm.classesByName(className);
@@ -188,6 +220,10 @@ public class ClasspathDiscoverer {
 		return null;
 	}
 
+	/**
+	 * Walks the target VM's type hierarchy to determine whether `type` is assignable to `target`.
+	 * Operates on JDI mirrors only — does not consult the MCP server's own class hierarchy.
+	 */
 	private boolean isAssignableTo(ReferenceType type, ClassType target) {
 		try {
 			if (type instanceof ClassType classType) {
@@ -199,6 +235,7 @@ public class ClasspathDiscoverer {
 		return false;
 	}
 
+	/** Walks the target VM's superclass chain looking for `target`. */
 	private boolean isSuperclassOf(ClassType classType, ClassType target) {
 		try {
 			ClassType current = classType;
@@ -259,6 +296,7 @@ public class ClasspathDiscoverer {
 		}
 	}
 
+	/** Invokes `URL.getPath()` in the target VM and returns the URL-decoded result. */
 	private String extractPathFromUrl(ObjectReference urlRef, ThreadReference suspendedThread) {
 		try {
 			ClassType urlClass = (ClassType) urlRef.referenceType();
@@ -271,18 +309,18 @@ public class ClasspathDiscoverer {
 				ClassType.INVOKE_SINGLE_THREADED
 			);
 
-			if (result instanceof StringReference stringRef) {
-				String path = stringRef.value();
-				// URL paths may be URL-encoded (e.g., spaces as %20)
-				// Decode if needed
-				return decodeUrlPath(path);
+			if (!(result instanceof StringReference stringRef)) {
+				return null;
 			}
+			// URL paths may be URL-encoded (e.g., spaces as %20) — decode if needed
+			return decodeUrlPath(stringRef.value());
 		} catch (Exception e) {
 			log.debug("[Discoverer] Error extracting path from URL: {}", e.getMessage());
+			return null;
 		}
-		return null;
 	}
 
+	/** Best-effort URL decode (e.g., `%20` → space); returns the original path on failure. */
 	private String decodeUrlPath(String path) {
 		try {
 			// Simple URL decoding (replace %20 with space, etc.)
@@ -293,6 +331,7 @@ public class ClasspathDiscoverer {
 		}
 	}
 
+	/** Invokes `ClassLoader.getParent()` to walk up the classloader hierarchy; `null` ends the chain. */
 	private ClassLoaderReference getParentClassLoader(
 			ClassLoaderReference classLoaderRef, ThreadReference suspendedThread) {
 		try {

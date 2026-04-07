@@ -10,28 +10,56 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * Orchestrates the evaluation of a Java expression within a given JDI StackFrame context.
- * It generates, compiles, injects, and executes code in the target VM.
+ * Orchestrates evaluation of a user-supplied Java expression against a live JDI {@link StackFrame}.
+ *
+ * Pipeline (per call to {@link #evaluate}):
+ * 1. Build evaluation context from the frame (locals + `this`).
+ * 2. Auto-rewrite bare `this.field` references via {@link #rewriteThisFieldReferences} when safe.
+ * 3. Cache lookup keyed on `signature + "###" + expression`; on miss, generate a wrapper class
+ *    with a UUID-suffixed name, compile via {@link InMemoryJavaCompiler}, and cache the bytecode.
+ * 4. Inject the bytecode into the target VM and execute via {@link RemoteCodeExecutor}.
+ *
+ * Cache eviction: when {@link #compilationCache} reaches {@link #MAX_CACHE_SIZE} entries it is
+ * fully flushed rather than LRU-evicted (see the inline comment on the eviction call for the
+ * design rationale).
+ *
+ * Class naming: every generated wrapper uses a fresh `UUID`-suffixed name. This avoids
+ * `LinkageError` when the MCP server reconnects to a freshly-restarted target VM and tries to
+ * load bytecode that the previous session had already pinned to a class name.
+ *
+ * Thread model: {@link #configureCompilerClasspath} MUST be called from the MCP worker thread
+ * BEFORE {@link #evaluate}, never from inside the JDI event listener. The configuration step
+ * issues `invokeMethod` calls that would deadlock the listener if it called itself.
  */
 @Slf4j
 @Service
 public class JdiExpressionEvaluator {
 
+	/** Package name baked into every generated wrapper class — kept short and isolated from app code. */
 	private static final String EVALUATION_PACKAGE = "mcp.jdi.evaluation";
+	/** Class name prefix; the actual name is `<prefix><UUID>` for collision-free reloads. */
 	private static final String EVALUATION_CLASS_PREFIX = "ExpressionEvaluator_";
+	/** Static method name on every wrapper class; signature is `(<context vars>) -> Object`. */
 	private static final String EVALUATION_METHOD_NAME = "evaluate";
+	/** Threshold for the full-flush eviction — see {@link #compilationCache}. */
 	private static final int MAX_CACHE_SIZE = 100;
 
 	private final InMemoryJavaCompiler compiler;
 	private final RemoteCodeExecutor remoteCodeExecutor;
 	private final JDIConnectionService jdiConnectionService;
 
-	// Cache: (context signature + expression) -> CachedCompilation (class name + bytecode map)
+	/**
+	 * Compilation cache. Key is `contextSignature + "###" + expression`, so two frames with the
+	 * same local types and names sharing the same expression hit the same compiled class. Cleared
+	 * on overflow ({@link #MAX_CACHE_SIZE}) and on every {@link #configureCompilerClasspath} call
+	 * (new connections may invalidate old bytecode).
+	 */
 	private final Map<String, CachedCompilation> compilationCache = new ConcurrentHashMap<>();
 
 	public JdiExpressionEvaluator(InMemoryJavaCompiler compiler,
@@ -43,12 +71,16 @@ public class JdiExpressionEvaluator {
 	}
 
 	/**
-	 * Evaluates a Java expression in the context of a given stack frame.
+	 * Evaluates `expression` in the context of `frame` and returns the result as a JDI {@link Value}.
+	 * Side effect: populates {@link #compilationCache}. The auto-rewrite of bare `this.field`
+	 * references only runs when `this`'s declared type is public — for non-public types the wrapper
+	 * class can't reference the type at all, so the rewrite would just produce a misleading
+	 * "type not visible" error.
 	 *
-	 * @param frame The stack frame providing the context (local variables, 'this').
-	 * @param expression The Java expression to evaluate.
-	 * @return The resulting Value from the evaluation.
-	 * @throws JdiEvaluationException if any part of the process fails.
+	 * @param frame      stack frame providing the context (local variables and `this`)
+	 * @param expression Java expression to evaluate
+	 * @return the JDI value produced by the user expression (autoboxed to `Object`)
+	 * @throws JdiEvaluationException wrapping any underlying compilation, classloader, or invocation failure
 	 */
 	public Value evaluate(StackFrame frame, String expression) throws JdiEvaluationException {
 		try {
@@ -65,10 +97,10 @@ public class JdiExpressionEvaluator {
 			// and we'd just produce a misleading compile error ("not visible" instead of a real hint).
 			ObjectReference thisObject = frame.thisObject();
 			if (thisObject != null && thisObject.referenceType() instanceof ClassType thisClass && thisClass.isPublic()) {
-				java.util.Set<String> shadowingLocals = context.getVariables().stream()
+				Set<String> shadowingLocals = context.getVariables().stream()
 					.map(v -> v.name)
 					.collect(Collectors.toSet());
-				java.util.Set<String> publicFieldNames = thisClass.allFields().stream()
+				Set<String> publicFieldNames = thisClass.allFields().stream()
 					.filter(Field::isPublic)
 					.map(Field::name)
 					.collect(Collectors.toSet());
@@ -78,7 +110,9 @@ public class JdiExpressionEvaluator {
 			// 2. Use cache key based on context + expression (excludes UUID for cache hits)
 			String cacheKey = context.getSignature() + "###" + expression;
 
-			// Evict entire cache when it exceeds the size limit to prevent unbounded memory growth
+			// Full-flush eviction is deliberate: LRU bookkeeping isn't worth it for a cache whose
+			// miss cost (compile + cache) is already orders of magnitude larger than just rebuilding
+			// the few entries that get hot again.
 			if (compilationCache.size() >= MAX_CACHE_SIZE) {
 				log.info("[Evaluator] Compilation cache reached {} entries, clearing", compilationCache.size());
 				compilationCache.clear();
@@ -149,8 +183,10 @@ public class JdiExpressionEvaluator {
 	}
 
 	/**
-	 * Extracts locals and the {@code this} reference from a stack frame. Uses declared type
-	 * rather than runtime type for {@code this} to handle proxy classes (Guice, CGLIB, etc.).
+	 * Extracts locals and the `this` reference from a stack frame. Uses declared type rather than
+	 * runtime type for `this` to handle proxy classes (Guice, CGLIB, etc.). Throws
+	 * `AbsentInformationException` if the frame's method was compiled without `-g` (no local
+	 * variable debug info).
 	 */
 	private EvaluationContext buildContext(StackFrame frame) throws AbsentInformationException {
 		List<ContextVariable> variables = new ArrayList<>();
@@ -165,6 +201,10 @@ public class JdiExpressionEvaluator {
 		}
 
 		for (LocalVariable var : frame.visibleVariables()) {
+			// Filter out synthetic `this$N` outer-class references emitted by `javac` for inner classes:
+			// they live in a different package than the wrapper class and so cannot be addressed from
+			// inside it. The `isArgument()` allowance is defensive — a real argument named `this$N`
+			// would be unusual but is technically valid bytecode.
 			if (var.isArgument() || !var.name().startsWith("this$")) {
 				String typeName = resolveLocalVarType(var);
 				variables.add(new ContextVariable(var.name(), typeName));
@@ -180,7 +220,7 @@ public class JdiExpressionEvaluator {
 	 */
 	private String resolveLocalVarType(LocalVariable var) {
 		try {
-			com.sun.jdi.Type t = var.type();
+			Type t = var.type();
 			if (t instanceof ReferenceType refType) {
 				return getDeclaredType(refType);
 			}
@@ -192,8 +232,11 @@ public class JdiExpressionEvaluator {
 	}
 
 	/**
-	 * Generates a wrapper class with a static {@code evaluate()} method that accepts
-	 * the context variables as parameters and returns the result of the user expression.
+	 * Generates a wrapper class with a static `evaluate()` method that accepts the context
+	 * variables as parameters and returns the result of the user expression. The user expression
+	 * is wrapped in `(Object)(...)` so any value type — including primitives via autoboxing —
+	 * can be returned. The bare `this` keyword in the expression is regex-rewritten to `_this`
+	 * because the wrapper class doesn't have a `this` reference (it's a static method).
 	 */
 	private String generateSourceCode(String className, EvaluationContext context, String expression) {
 		String packageName = EVALUATION_PACKAGE;
@@ -203,8 +246,10 @@ public class JdiExpressionEvaluator {
 			.map(v -> v.type + " " + v.name)
 			.collect(Collectors.joining(", "));
 
-		// Replace 'this' with '_this' in the expression to match the parameter name
-		String safeExpression = expression.replaceAll("(?<!\\w)this(?!\\w)", "_this");
+		// Replace bare `this` keyword with `_this` to match the wrapper's static-method parameter name.
+		// Tokenizer-aware so identifiers like `myThis`/`thisFoo` and `this` tokens inside string/char
+		// literals are NOT rewritten — see {@link #rewriteThisKeyword(String)}.
+		String safeExpression = rewriteThisKeyword(expression);
 
 		return "package " + packageName + ";\n" +
 			   "\n" +
@@ -262,6 +307,16 @@ public class JdiExpressionEvaluator {
 		return typeName;
 	}
 
+	/**
+	 * Locates a non-null {@link ClassLoaderReference} for injecting the wrapper class. Three-level
+	 * fallback:
+	 * 1. `frame.thisObject().referenceType().classLoader()` — works for instance methods.
+	 * 2. `frame.location().declaringType().classLoader()` — works for static methods.
+	 * 3. Invokes `ClassLoader.getSystemClassLoader()` in the target VM as a last resort.
+	 *
+	 * Throws {@link JdiEvaluationException} if all three return null — typically meaning the frame
+	 * is in a bootstrap-loaded class on a JVM where the system classloader is also unreachable.
+	 */
 	private ClassLoaderReference findClassLoader(StackFrame frame) throws JdiEvaluationException {
 		ObjectReference thisObject = frame.thisObject();
 		if (thisObject != null) {
@@ -331,12 +386,12 @@ public class JdiExpressionEvaluator {
 	 * @param shadowingLocals  local variable names that shadow fields and must NOT be rewritten
 	 * @return the expression with bare field references (outside string/char literals) prefixed by {@code _this.}
 	 */
-	static String rewriteThisFieldReferences(String expression, java.util.Set<String> thisFieldNames,
-			java.util.Set<String> shadowingLocals) {
+	static String rewriteThisFieldReferences(String expression, Set<String> thisFieldNames,
+			Set<String> shadowingLocals) {
 		if (thisFieldNames.isEmpty()) {
 			return expression;
 		}
-		java.util.Set<String> rewritable = thisFieldNames.stream()
+		Set<String> rewritable = thisFieldNames.stream()
 			.filter(name -> !shadowingLocals.contains(name))
 			.collect(Collectors.toSet());
 		if (rewritable.isEmpty()) {
@@ -368,6 +423,53 @@ public class JdiExpressionEvaluator {
 					out.append(identifier);
 				} else {
 					out.append("_this.").append(identifier);
+				}
+				i = end;
+			} else {
+				out.append(c);
+				i++;
+			}
+		}
+		return out.toString();
+	}
+
+	/**
+	 * Rewrites bare `this` keyword references to `_this` so the wrapper class — which compiles to
+	 * a static method and therefore has no real `this` — can refer to the original `this` via its
+	 * synthetic parameter. Uses the same hand-rolled tokenizer as {@link #rewriteThisFieldReferences}
+	 * so that the keyword is NOT rewritten when it appears inside a string literal, char literal,
+	 * or text block, and identifiers that merely contain `this` as a substring (e.g. `myThis`,
+	 * `thisFoo`) are left untouched.
+	 *
+	 * <p>Replaces an earlier naive `replaceAll("(?&lt;!\\w)this(?!\\w)", "_this")` that corrupted
+	 * string-literal contents.
+	 *
+	 * <p>Static + package-private so it can be unit-tested without a real {@link StackFrame}.
+	 */
+	static String rewriteThisKeyword(String expression) {
+		StringBuilder out = new StringBuilder(expression.length() + 8);
+		int i = 0;
+		int n = expression.length();
+		while (i < n) {
+			char c = expression.charAt(i);
+			if (c == '"') {
+				int end = skipStringLiteral(expression, i);
+				out.append(expression, i, end);
+				i = end;
+			} else if (c == '\'') {
+				int end = skipCharLiteral(expression, i);
+				out.append(expression, i, end);
+				i = end;
+			} else if (Character.isJavaIdentifierStart(c)) {
+				int end = i + 1;
+				while (end < n && Character.isJavaIdentifierPart(expression.charAt(end))) {
+					end++;
+				}
+				String identifier = expression.substring(i, end);
+				if ("this".equals(identifier)) {
+					out.append("_this");
+				} else {
+					out.append(identifier);
 				}
 				i = end;
 			} else {
@@ -456,7 +558,9 @@ public class JdiExpressionEvaluator {
 	}
 
 	/**
-	 * Captures the variable names, types, and values from a stack frame for expression compilation.
+	 * Captures the variable names, types, values, and a derived signature from a stack frame for
+	 * expression compilation. The signature is used as part of the compilation cache key so frames
+	 * with the same shape can share a compiled wrapper.
 	 */
 	private static class EvaluationContext {
 		private final List<ContextVariable> variables;
@@ -497,9 +601,11 @@ public class JdiExpressionEvaluator {
 	}
 
 	/**
-	 * Configures the compiler with the target JVM's classpath. Skips if already configured for the current connection.
-	 * Automatically reconfigures after a disconnect/reconnect cycle (detected via null JDK path).
-	 * Must be called BEFORE any expression evaluation to avoid nested JDI calls.
+	 * Configures the compiler with the target JVM's classpath. Skips if already configured for the
+	 * current connection. Automatically reconfigures after a disconnect/reconnect cycle (detected
+	 * via null JDK path) and clears the compilation cache on reconfiguration because stale bytecode
+	 * may reference classes from a previous connection. Must be called BEFORE any expression
+	 * evaluation to avoid nested JDI calls.
 	 *
 	 * @param suspendedThread a thread already suspended at a breakpoint (REQUIRED)
 	 */

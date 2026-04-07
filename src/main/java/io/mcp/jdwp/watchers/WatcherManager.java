@@ -6,20 +6,34 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Manages watchers attached to JDWP breakpoints.
- * Watchers are stored MCP-side (not in the target JVM) and evaluated using JdiExpressionEvaluator.
+ * CRUD service for {@link Watcher} instances. Watchers are stored MCP-side (not in the target JVM)
+ * and evaluated on demand by `JDWPTools.jdwp_evaluate_watchers` using
+ * {@link io.mcp.jdwp.evaluation.JdiExpressionEvaluator}.
  *
- * This service maintains two indexes for efficient lookups:
- * - By watcher ID (for direct access)
- * - By breakpoint ID (for event-driven evaluation)
+ * Two indexes are maintained for efficient lookup:
+ * - {@link #watchersById} — primary, by watcher UUID for direct CRUD.
+ * - {@link #watchersByBreakpoint} — secondary, by breakpoint id for evaluation triggered by a hit.
+ *
+ * The secondary index is auto-cleaned: when a breakpoint's watcher list becomes empty its entry is
+ * removed, so {@link #getStats()}'s `breakpointsWithWatchers` count never drifts.
+ *
+ * Lifecycle: cleared by `jdwp_reset`, `jdwp_disconnect`, and `jdwp_clear_all_watchers`. Entries are
+ * also auto-removed when their parent breakpoint is cleared (`JDWPTools.jdwp_clear_breakpoint` /
+ * `jdwp_clear_breakpoint_by_id` call {@link #deleteWatchersForBreakpoint}).
+ *
+ * Thread-safety: maps are {@link ConcurrentHashMap}; the public mutators are `synchronized` so
+ * the dual-index updates remain atomic against concurrent reads.
  */
 @Service
 public class WatcherManager {
 
-	// Primary index: watcherId -> Watcher
+	/** Primary index: watcher UUID to {@link Watcher}. */
 	private final Map<String, Watcher> watchersById = new ConcurrentHashMap<>();
 
-	// Secondary index: breakpointId -> List<Watcher>
+	/**
+	 * Secondary index: breakpoint id to its watcher list. Empty lists are removed eagerly so
+	 * {@link #getStats()}'s `breakpointsWithWatchers` count stays accurate.
+	 */
 	private final Map<Integer, List<Watcher>> watchersByBreakpoint = new ConcurrentHashMap<>();
 
 	/**
