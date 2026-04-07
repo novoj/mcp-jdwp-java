@@ -169,6 +169,7 @@ public class JdiEventListener {
 					"line", String.valueOf(lineNumber), "thread", threadName)));
 
 			log.info("[JDI] Breakpoint {} hit on thread {} at {}:{}", bpId, threadName, className, lineNumber);
+			breakpointTracker.fireNextEvent();
 			return true;
 
 		} catch (Exception e) {
@@ -190,6 +191,7 @@ public class JdiEventListener {
 			eventHistory.record(new EventHistory.DebugEvent("STEP",
 				String.format("Step to %s:%d on thread %s", className, lineNumber, threadName),
 				Map.of("class", className, "line", String.valueOf(lineNumber), "thread", threadName)));
+			breakpointTracker.fireNextEvent();
 		} catch (Exception e) {
 			log.debug("[JDI] Error recording step event: {}", e.getMessage());
 		}
@@ -209,6 +211,7 @@ public class JdiEventListener {
 			String threadName = event.thread().name();
 
 			breakpointTracker.setLastBreakpointThread(event.thread(), -1);
+			breakpointTracker.fireNextEvent();
 
 			eventHistory.record(new EventHistory.DebugEvent("EXCEPTION",
 				String.format("%s thrown at %s, caught at %s on thread %s",

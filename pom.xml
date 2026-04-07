@@ -23,6 +23,8 @@
         <java.version>17</java.version>
         <spring-ai-mcp.version>2.0.0-M4</spring-ai-mcp.version>
         <ecj.version>3.45.0</ecj.version>
+        <!-- Default empty so surefire's argLine can be extended via -DargLine="..." on the command line -->
+        <argLine></argLine>
     </properties>
 
     <dependencies>
@@ -79,7 +81,10 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <argLine>--add-modules jdk.jdi</argLine>
+                    <!-- The argLine property comes from the empty default in properties, or from -DargLine on
+                         the command line. This pattern lets users append JVM args (e.g. JDWP agent) without
+                         losing the JDI module flag. -->
+                    <argLine>--add-modules jdk.jdi ${argLine}</argLine>
                 </configuration>
             </plugin>
             <plugin>

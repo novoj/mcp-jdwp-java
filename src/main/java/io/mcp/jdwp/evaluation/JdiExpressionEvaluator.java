@@ -58,6 +58,23 @@ public class JdiExpressionEvaluator {
 			// 1. Analyze the frame to build the evaluation context
 			EvaluationContext context = buildContext(frame);
 
+			// Auto-rewrite bare references to fields of `this` so users can write
+			// `sessions.containsKey(session)` instead of `_this.sessions.containsKey(session)`.
+			// Only safe when `this`'s declared type is public AND the specific field is public —
+			// otherwise the wrapper class either can't reference the type or can't access the field,
+			// and we'd just produce a misleading compile error ("not visible" instead of a real hint).
+			ObjectReference thisObject = frame.thisObject();
+			if (thisObject != null && thisObject.referenceType() instanceof ClassType thisClass && thisClass.isPublic()) {
+				java.util.Set<String> shadowingLocals = context.getVariables().stream()
+					.map(v -> v.name)
+					.collect(Collectors.toSet());
+				java.util.Set<String> publicFieldNames = thisClass.allFields().stream()
+					.filter(Field::isPublic)
+					.map(Field::name)
+					.collect(Collectors.toSet());
+				expression = rewriteThisFieldReferences(expression, publicFieldNames, shadowingLocals);
+			}
+
 			// 2. Use cache key based on context + expression (excludes UUID for cache hits)
 			String cacheKey = context.getSignature() + "###" + expression;
 
@@ -283,6 +300,159 @@ public class JdiExpressionEvaluator {
 			"Could not find a non-null ClassLoader. The frame may be in a bootstrap-loaded class " +
 			"and ClassLoader.getSystemClassLoader() was not available."
 		);
+	}
+
+	/**
+	 * Rewrites bare references to fields of {@code this} as {@code _this.field} so the wrapper class
+	 * can resolve them. Only safe to call when {@code this}'s declared type is public AND each
+	 * candidate field is itself public — for non-public types or fields the wrapper class still
+	 * couldn't access the field even after the rewrite. The caller decides what's safe to pass.
+	 *
+	 * <p>Implemented as a hand-rolled lightweight tokenizer rather than a regex so that bare field
+	 * names appearing INSIDE string literals, char literals, or text blocks are NOT rewritten.
+	 * Without this, an expression like {@code "name=" + name} (with field {@code name}) would
+	 * incorrectly become {@code "_this.name=" + _this.name}, corrupting the string content.
+	 *
+	 * <p>The tokenizer handles:
+	 * <ul>
+	 *   <li>Regular string literals {@code "..."} with backslash escapes</li>
+	 *   <li>Java text blocks {@code """..."""} with multi-line content and escapes</li>
+	 *   <li>Character literals {@code '.'} including {@code '\u0041'} escapes</li>
+	 *   <li>Qualified references — an identifier preceded by {@code .} (with optional whitespace)
+	 *       is treated as a field/method access on something else and is NOT rewritten</li>
+	 *   <li>Identifier characters per {@link Character#isJavaIdentifierStart(int)} /
+	 *       {@link Character#isJavaIdentifierPart(int)}</li>
+	 * </ul>
+	 *
+	 * <p>Static + package-private so it can be unit-tested without a real {@link StackFrame}.
+	 *
+	 * @param expression       the user-supplied Java expression
+	 * @param thisFieldNames   field names declared on {@code this}'s type (already filtered for publicness)
+	 * @param shadowingLocals  local variable names that shadow fields and must NOT be rewritten
+	 * @return the expression with bare field references (outside string/char literals) prefixed by {@code _this.}
+	 */
+	static String rewriteThisFieldReferences(String expression, java.util.Set<String> thisFieldNames,
+			java.util.Set<String> shadowingLocals) {
+		if (thisFieldNames.isEmpty()) {
+			return expression;
+		}
+		java.util.Set<String> rewritable = thisFieldNames.stream()
+			.filter(name -> !shadowingLocals.contains(name))
+			.collect(Collectors.toSet());
+		if (rewritable.isEmpty()) {
+			return expression;
+		}
+
+		StringBuilder out = new StringBuilder(expression.length() + 16);
+		int i = 0;
+		int n = expression.length();
+		while (i < n) {
+			char c = expression.charAt(i);
+			if (c == '"') {
+				// String literal or text block — copy verbatim, do not rewrite contents
+				int end = skipStringLiteral(expression, i);
+				out.append(expression, i, end);
+				i = end;
+			} else if (c == '\'') {
+				// Char literal — copy verbatim
+				int end = skipCharLiteral(expression, i);
+				out.append(expression, i, end);
+				i = end;
+			} else if (Character.isJavaIdentifierStart(c)) {
+				int end = i + 1;
+				while (end < n && Character.isJavaIdentifierPart(expression.charAt(end))) {
+					end++;
+				}
+				String identifier = expression.substring(i, end);
+				if (!rewritable.contains(identifier) || isPrecededByDot(expression, i)) {
+					out.append(identifier);
+				} else {
+					out.append("_this.").append(identifier);
+				}
+				i = end;
+			} else {
+				out.append(c);
+				i++;
+			}
+		}
+		return out.toString();
+	}
+
+	/**
+	 * Returns true if the character at position {@code pos} is preceded by a {@code .}
+	 * (skipping whitespace) — indicating a qualified reference like {@code obj.field}
+	 * or {@code obj . field} that should NOT be rewritten.
+	 */
+	private static boolean isPrecededByDot(String s, int pos) {
+		for (int j = pos - 1; j >= 0; j--) {
+			char p = s.charAt(j);
+			if (Character.isWhitespace(p)) {
+				continue;
+			}
+			return p == '.';
+		}
+		return false;
+	}
+
+	/**
+	 * Returns the index just past the end of a string literal that starts at position {@code start}.
+	 * Handles both regular strings ({@code "..."}) and Java text blocks ({@code """..."""}),
+	 * with backslash escape sequences. If the literal is unterminated, returns the end of the string
+	 * (best-effort tolerance — we never throw on malformed input).
+	 */
+	private static int skipStringLiteral(String s, int start) {
+		int n = s.length();
+		// Text block: """..."""
+		if (start + 3 <= n && s.charAt(start + 1) == '"' && s.charAt(start + 2) == '"') {
+			int i = start + 3;
+			while (i < n) {
+				if (s.charAt(i) == '\\') {
+					i = Math.min(i + 2, n);
+					continue;
+				}
+				if (i + 3 <= n && s.charAt(i) == '"' && s.charAt(i + 1) == '"' && s.charAt(i + 2) == '"') {
+					return i + 3;
+				}
+				i++;
+			}
+			return n;
+		}
+		// Regular string literal
+		int i = start + 1;
+		while (i < n) {
+			char c = s.charAt(i);
+			if (c == '\\') {
+				i = Math.min(i + 2, n);
+				continue;
+			}
+			if (c == '"') {
+				return i + 1;
+			}
+			i++;
+		}
+		return n;
+	}
+
+	/**
+	 * Returns the index just past the end of a char literal starting at position {@code start}.
+	 * Handles backslash escapes (including {@code '\u0041'} unicode escapes). Tolerant of
+	 * unterminated literals — returns the end of the string in that case.
+	 */
+	private static int skipCharLiteral(String s, int start) {
+		int n = s.length();
+		int i = start + 1;
+		while (i < n) {
+			char c = s.charAt(i);
+			if (c == '\\') {
+				i = Math.min(i + 2, n);
+				continue;
+			}
+			if (c == '\'') {
+				return i + 1;
+			}
+			i++;
+		}
+		return n;
 	}
 
 	/**

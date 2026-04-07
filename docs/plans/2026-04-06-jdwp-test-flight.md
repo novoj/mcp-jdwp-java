@@ -12,6 +12,8 @@
 
 ## Prerequisites
 
+> **Note on launch flags:** `-Dmaven.surefire.debug` is surefire's built-in JDWP attach (port 5005, `suspend=y`) and is appended on top of the pom's existing `--add-modules jdk.jdi` argLine. If you need to pass *additional* JVM args alongside the debug agent, use `-DargLine="-Xfoo -Xbar"` — since 2026-04-07 the pom interpolates `${argLine}` so this no longer overrides the JDI module flag.
+
 ### Build the MCP server JAR
 
 ```bash
@@ -56,9 +58,7 @@ In a **separate terminal** (not inside CC):
 
 ```bash
 cd /workspace
-mvn test -o \
-  -Dtest="io.mcp.jdwp.sandbox.order.OrderProcessorTest" \
-  -DargLine="-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005"
+mvn test -o -Dtest="io.mcp.jdwp.sandbox.order.OrderProcessorTest" -Dmaven.surefire.debug
 ```
 
 Expected output: `Listening for transport dt_socket at address: 5005` — JVM is suspended, waiting for debugger.
@@ -121,9 +121,7 @@ CC identifies that `AuditLogger.cacheFormattedTotal()` casts the total to `int` 
 
 ```bash
 cd /workspace
-mvn test -o \
-  -Dtest="io.mcp.jdwp.sandbox.session.SessionStoreTest" \
-  -DargLine="-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005"
+mvn test -o -Dtest="io.mcp.jdwp.sandbox.session.SessionStoreTest" -Dmaven.surefire.debug
 ```
 
 ### Step 2: Connect and set breakpoints
@@ -157,9 +155,7 @@ CC identifies that `hashCode()` changed after `upgradeRole()` was called, so `Ha
 
 ```bash
 cd /workspace
-mvn test -o \
-  -Dtest="io.mcp.jdwp.sandbox.bank.TransferServiceTest" \
-  -DargLine="-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005"
+mvn test -o -Dtest="io.mcp.jdwp.sandbox.bank.TransferServiceTest" -Dmaven.surefire.debug
 ```
 
 ### Step 2: Connect and set breakpoint in transfer method
@@ -189,9 +185,7 @@ CC identifies that `snapshotBalances()` is called between `withdraw()` and `depo
 
 ```bash
 cd /workspace
-mvn test -o \
-  -Dtest="io.mcp.jdwp.sandbox.config.ConfigurationProviderTest" \
-  -DargLine="-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005"
+mvn test -o -Dtest="io.mcp.jdwp.sandbox.config.ConfigurationProviderTest" -Dmaven.surefire.debug
 ```
 
 ### Step 2: Breakpoint inside the provider's initialization
@@ -218,9 +212,7 @@ CC identifies that `instance` is visible to the reader thread before `init()` ru
 
 ```bash
 cd /workspace
-mvn test -o \
-  -Dtest="io.mcp.jdwp.sandbox.events.EventBusTest" \
-  -DargLine="-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005"
+mvn test -o -Dtest="io.mcp.jdwp.sandbox.events.EventBusTest" -Dmaven.surefire.debug
 ```
 
 ### Step 2: Breakpoint in EventBus catch block

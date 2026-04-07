@@ -36,6 +36,10 @@ public class JDIConnectionService {
 	// Cache to store encountered ObjectReferences
 	private final Map<Long, ObjectReference> objectCache = new ConcurrentHashMap<>();
 
+	private static final java.util.Set<String> BOXED_PRIMITIVE_TYPES = java.util.Set.of(
+		"java.lang.Integer", "java.lang.Long", "java.lang.Double", "java.lang.Float",
+		"java.lang.Boolean", "java.lang.Character", "java.lang.Byte", "java.lang.Short");
+
 	public JDIConnectionService(JdiEventListener eventListener, BreakpointTracker breakpointTracker,
 								EventHistory eventHistory, WatcherManager watcherManager) {
 		this.eventListener = eventListener;
@@ -495,11 +499,44 @@ public class JDIConnectionService {
 		}
 
 		if (value instanceof ObjectReference obj) {
+			String unboxed = tryUnboxPrimitive(obj);
+			if (unboxed != null) {
+				return unboxed;
+			}
 			cacheObject(obj); // Store in cache for later inspection
 			return String.format("Object#%d (%s)", obj.uniqueID(), obj.referenceType().name());
 		}
 
 		return value.toString();
+	}
+
+	/**
+	 * If {@code obj} is a wrapper type for a Java primitive, reads its private {@code value} field
+	 * directly via JDI (no invocation needed) and returns the unboxed string form. Returns {@code null}
+	 * for any other type so the caller can fall through to the regular {@code Object#N (...)} rendering.
+	 */
+	private String tryUnboxPrimitive(ObjectReference obj) {
+		String typeName = obj.referenceType().name();
+		if (!isBoxedPrimitiveType(typeName)) {
+			return null;
+		}
+		Field valueField = obj.referenceType().fieldByName("value");
+		if (valueField == null) {
+			return null;
+		}
+		Value inner = obj.getValue(valueField);
+		if (inner instanceof PrimitiveValue) {
+			return inner.toString();
+		}
+		return null;
+	}
+
+	/**
+	 * Pure type-name check for the eight Java primitive wrapper classes. Extracted as a separate
+	 * static so it can be unit-tested without a {@link ObjectReference}.
+	 */
+	static boolean isBoxedPrimitiveType(String typeName) {
+		return typeName != null && BOXED_PRIMITIVE_TYPES.contains(typeName);
 	}
 
 	/**
@@ -594,6 +631,15 @@ public class JDIConnectionService {
 	 */
 	public ObjectReference getCachedObject(long objectId) {
 		return objectCache.get(objectId);
+	}
+
+	/**
+	 * Clears the entire object reference cache. Called by {@code jdwp_reset} to wipe per-session
+	 * state without dropping the VM connection. Does NOT touch breakpoints, watchers, or event
+	 * history — those are owned by their respective services and reset separately.
+	 */
+	public void clearObjectCache() {
+		objectCache.clear();
 	}
 
 	/**
@@ -712,19 +758,7 @@ public class JDIConnectionService {
 	}
 
 	private boolean isJvmInternalThread(ThreadReference t) {
-		try {
-			String name = t.name();
-			return name.equals("Reference Handler")
-				|| name.equals("Finalizer")
-				|| name.equals("Signal Dispatcher")
-				|| name.equals("Common-Cleaner")
-				|| name.startsWith("GC ")
-				|| name.startsWith("G1 ")
-				|| name.startsWith("Notification Thread")
-				|| name.startsWith("Service Thread");
-		} catch (Exception e) {
-			return true; // err on the side of skipping
-		}
+		return ThreadFormatting.isJvmInternalThread(t);
 	}
 
 }

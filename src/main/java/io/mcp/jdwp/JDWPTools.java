@@ -61,6 +61,51 @@ public class JDWPTools {
 		}
 	}
 
+	@McpTool(description = "Wait until a JVM is listening for JDWP and attach. Polls every 200ms until timeout. Use this to bootstrap a debug session without manually polling for the listener — call this after launching the target with `mvn test -Dmaven.surefire.debug` (or any other JVM started with `-agentlib:jdwp=...,suspend=y`).")
+	public String jdwp_wait_for_attach(
+			@McpToolParam(required = false, description = "Hostname (default: localhost)") String host,
+			@McpToolParam(required = false, description = "JDWP port (default: 5005 — overridable via -DJVM_JDWP_PORT)") Integer port,
+			@McpToolParam(required = false, description = "Maximum wait time in milliseconds (default: 30000)") Integer timeoutMs) {
+		String resolvedHost = (host == null || host.isBlank()) ? "localhost" : host;
+		int resolvedPort = (port != null) ? port : JVM_JDWP_PORT;
+		int deadlineMs = (timeoutMs != null && timeoutMs > 0) ? timeoutMs : 30_000;
+
+		long deadline = System.currentTimeMillis() + deadlineMs;
+		int attempts = 0;
+		String lastError = "none";
+
+		while (System.currentTimeMillis() < deadline) {
+			attempts++;
+			try {
+				String result = jdiService.connect(resolvedHost, resolvedPort);
+				return String.format("%s (attached after %d attempt(s))", result, attempts);
+			} catch (com.sun.jdi.connect.IllegalConnectorArgumentsException e) {
+				// Configuration error — retrying will never make this succeed. Fail fast.
+				return String.format("[ERROR] Invalid connector arguments for %s:%d — %s",
+					resolvedHost, resolvedPort, e.getMessage());
+			} catch (java.io.IOException e) {
+				// Connection refused or similar — JVM not listening yet, retry.
+				lastError = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+			} catch (Exception e) {
+				// Could be a transient handshake race during JVM startup; retry until deadline.
+				lastError = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+			}
+			try {
+				Thread.sleep(200);
+			} catch (InterruptedException ie) {
+				Thread.currentThread().interrupt();
+				return String.format("[INTERRUPTED] After %d attempt(s) waiting for %s:%d. Last error: %s",
+					attempts, resolvedHost, resolvedPort, lastError);
+			}
+		}
+
+		return String.format("[TIMEOUT] No JVM listening on %s:%d after %d attempt(s) over %dms.\n" +
+			"Last error: %s\n\n" +
+			"Make sure the target JVM was launched with -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:%d\n" +
+			"For Maven tests in this repo, use: mvn test -Dmaven.surefire.debug",
+			resolvedHost, resolvedPort, attempts, deadlineMs, lastError, resolvedPort);
+	}
+
 	@McpTool(description = "Disconnect from the JDWP server")
 	public String jdwp_disconnect() {
 		return jdiService.disconnect();
@@ -77,21 +122,29 @@ public class JDWPTools {
 		}
 	}
 
-	@McpTool(description = "List all threads in the JVM with their status and frame count")
-	public String jdwp_get_threads() {
+	@McpTool(description = "List user threads in the JVM (status, frame count). System/JVM-internal threads (Reference Handler, Finalizer, surefire workers, etc.) are hidden unless includeSystemThreads=true.")
+	public String jdwp_get_threads(
+			@McpToolParam(required = false, description = "Include JVM/JDK/test-runner internal threads (default: false)") Boolean includeSystemThreads) {
 		try {
+			boolean includeSystem = includeSystemThreads != null && includeSystemThreads;
 			VirtualMachine vm = jdiService.getVM();
-			List<ThreadReference> threads = vm.allThreads();
+			List<ThreadReference> all = vm.allThreads();
+			List<ThreadReference> threads = includeSystem
+				? all
+				: all.stream().filter(t -> !ThreadFormatting.isJvmInternalThread(t)).toList();
 
 			StringBuilder result = new StringBuilder();
-			result.append(String.format("Found %d threads:\n\n", threads.size()));
+			int hidden = all.size() - threads.size();
+			result.append(String.format("Found %d thread(s)%s:\n\n",
+				threads.size(),
+				hidden > 0 ? String.format(" (%d system thread(s) hidden — pass includeSystemThreads=true to show)", hidden) : ""));
 
 			for (int i = 0; i < threads.size(); i++) {
 				ThreadReference thread = threads.get(i);
 				result.append(String.format("Thread %d:\n", i));
 				result.append(String.format("  ID: %d\n", thread.uniqueID()));
 				result.append(String.format("  Name: %s\n", thread.name()));
-				result.append(String.format("  Status: %d\n", thread.status()));
+				result.append(String.format("  Status: %s\n", ThreadFormatting.formatStatus(thread.status())));
 				result.append(String.format("  Suspended: %s\n", thread.isSuspended()));
 
 				if (thread.isSuspended()) {
@@ -110,9 +163,25 @@ public class JDWPTools {
 		}
 	}
 
-	@McpTool(description = "Get the call stack for a specific thread (by thread ID)")
-	public String jdwp_get_stack(@McpToolParam(description = "Thread unique ID") long threadId) {
+	private static final String[] NOISE_PACKAGE_PREFIXES = {
+		"org.junit.",
+		"org.apache.maven.surefire.",
+		"jdk.internal.reflect.",
+		"java.lang.reflect.",
+		"java.lang.invoke.",
+		"sun.reflect.",
+		"jdk.internal.invoke."
+	};
+
+	@McpTool(description = "Get the call stack for a specific thread. Defaults to top 10 user frames; junit/surefire/reflection internals are collapsed unless you pass includeNoise=true or raise maxFrames.")
+	public String jdwp_get_stack(
+			@McpToolParam(description = "Thread unique ID") long threadId,
+			@McpToolParam(required = false, description = "Maximum frames to render (default: 10). Higher values include deeper call sites.") Integer maxFrames,
+			@McpToolParam(required = false, description = "If true, do not collapse junit/maven/reflection frames (default: false)") Boolean includeNoise) {
 		try {
+			int limit = (maxFrames != null && maxFrames > 0) ? maxFrames : 10;
+			boolean includeNoiseFrames = includeNoise != null && includeNoise;
+
 			VirtualMachine vm = jdiService.getVM();
 			ThreadReference thread = findThread(vm, threadId);
 			if (thread == null) {
@@ -125,26 +194,10 @@ public class JDWPTools {
 
 			List<StackFrame> frames = thread.frames();
 			StringBuilder result = new StringBuilder();
-			result.append(String.format("Stack trace for thread %d (%s) - %d frames:\n\n",
+			result.append(String.format("Stack trace for thread %d (%s) - %d frame(s) total:\n\n",
 				threadId, thread.name(), frames.size()));
 
-			for (int i = 0; i < frames.size(); i++) {
-				StackFrame frame = frames.get(i);
-				Location location = frame.location();
-
-				result.append(String.format("Frame %d:\n", i));
-				result.append(String.format("  at %s.%s(",
-					location.declaringType().name(),
-					location.method().name()));
-
-				try {
-					result.append(String.format("%s:%d)\n",
-						location.sourceName(),
-						location.lineNumber()));
-				} catch (AbsentInformationException e) {
-					result.append("Unknown Source)\n");
-				}
-			}
+			appendUserFrames(result, frames, limit, includeNoiseFrames, "");
 
 			return result.toString();
 		} catch (Exception e) {
@@ -152,7 +205,74 @@ public class JDWPTools {
 		}
 	}
 
-	@McpTool(description = "Get local variables for a specific frame in a thread")
+	/**
+	 * Appends a human-readable list of stack frames to {@code out}, collapsing
+	 * junit/maven/reflection noise frames (unless {@code includeNoiseFrames} is true) and stopping
+	 * after {@code limit} user frames have been rendered. Used by both {@link #jdwp_get_stack}
+	 * and {@link #jdwp_get_breakpoint_context} to keep the rendering identical.
+	 *
+	 * @param out                 destination buffer
+	 * @param frames              the full frame list (typically from {@link ThreadReference#frames()})
+	 * @param limit               maximum number of user frames to render
+	 * @param includeNoiseFrames  if true, render noise frames inline; if false, collapse them into a summary line
+	 * @param indent              prefix prepended to each frame line (e.g. {@code "  "} for the breakpoint-context dump)
+	 */
+	private static void appendUserFrames(StringBuilder out, List<StackFrame> frames, int limit,
+			boolean includeNoiseFrames, String indent) {
+		int rendered = 0;
+		int collapsedNoise = 0;
+		for (int i = 0; i < frames.size() && rendered < limit; i++) {
+			StackFrame frame = frames.get(i);
+			Location location = frame.location();
+			String declaringType = location.declaringType().name();
+
+			if (!includeNoiseFrames && isNoiseFrame(declaringType)) {
+				collapsedNoise++;
+				continue;
+			}
+
+			String src;
+			try {
+				src = location.sourceName() + ":" + location.lineNumber();
+			} catch (AbsentInformationException e) {
+				src = "Unknown Source";
+			}
+			out.append(String.format("%s#%d %s.%s (%s)\n",
+				indent, i, declaringType, location.method().name(), src));
+			rendered++;
+		}
+
+		if (collapsedNoise > 0) {
+			out.append(String.format("%s... %d junit/maven/reflection frame(s) collapsed (pass includeNoise=true to show)\n",
+				indent, collapsedNoise));
+		}
+		if (rendered >= limit && frames.size() > limit + collapsedNoise) {
+			int remaining = frames.size() - limit - collapsedNoise;
+			out.append(String.format("%s... %d more frame(s) hidden (raise maxFrames to see them)\n",
+				indent, remaining));
+		}
+	}
+
+	/**
+	 * Convenience overload that always collapses noise frames (used by
+	 * {@code jdwp_get_breakpoint_context}, which never exposes the {@code includeNoise} option to
+	 * the caller). See the 5-arg overload for the {@code indent} contract.
+	 */
+	private static void appendUserFrames(StringBuilder out, List<StackFrame> frames, int limit, String indent) {
+		appendUserFrames(out, frames, limit, false, indent);
+	}
+
+	/** Returns true if the declaring class belongs to a known-noisy framework or JDK internal. */
+	static boolean isNoiseFrame(String declaringType) {
+		for (String prefix : NOISE_PACKAGE_PREFIXES) {
+			if (declaringType.startsWith(prefix)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	@McpTool(description = "Get local variables for a specific frame in a thread. Also includes 'this' (cached as Object#N) for instance methods.")
 	public String jdwp_get_locals(
 			@McpToolParam(description = "Thread unique ID") long threadId,
 			@McpToolParam(description = "Frame index (0 = current frame)") int frameIndex) {
@@ -164,15 +284,22 @@ public class JDWPTools {
 			}
 
 			StackFrame frame = thread.frame(frameIndex);
-			Map<LocalVariable, Value> vars = frame.getValues(frame.visibleVariables());
-
 			StringBuilder result = new StringBuilder();
 			result.append(String.format("Local variables in frame %d:\n\n", frameIndex));
 
+			// Synthetic 'this' entry for instance methods. Cached so the user can immediately call
+			// jdwp_get_fields(<id>) without a separate eval round-trip.
+			ObjectReference thisObj = frame.thisObject();
+			if (thisObj != null) {
+				result.append(String.format("this (%s) = %s\n",
+					thisObj.referenceType().name(),
+					formatValue(thisObj)));
+			}
+
+			Map<LocalVariable, Value> vars = frame.getValues(frame.visibleVariables());
 			for (Map.Entry<LocalVariable, Value> entry : vars.entrySet()) {
 				LocalVariable var = entry.getKey();
 				Value value = entry.getValue();
-
 				result.append(String.format("%s (%s) = %s\n",
 					var.name(),
 					var.typeName(),
@@ -197,7 +324,7 @@ public class JDWPTools {
 	@McpTool(description = "Invoke toString() on a cached object to get its string representation")
 	public String jdwp_to_string(
 			@McpToolParam(description = "Object unique ID (from jdwp_get_locals or jdwp_get_fields)") long objectId,
-			@McpToolParam(description = "Thread unique ID (must be suspended). If omitted, uses the last breakpoint thread.") Long threadId) {
+			@McpToolParam(required = false, description = "Thread unique ID (must be suspended). If omitted, uses the last breakpoint thread.") Long threadId) {
 		try {
 			ObjectReference obj = jdiService.getCachedObject(objectId);
 			if (obj == null) {
@@ -245,7 +372,7 @@ public class JDWPTools {
 	public String jdwp_evaluate_expression(
 			@McpToolParam(description = "Thread unique ID") long threadId,
 			@McpToolParam(description = "Java expression to evaluate (e.g., 'order.getTotal()', 'x + y', 'name.length()')") String expression,
-			@McpToolParam(description = "Frame index (0 = current frame, default: 0)") Integer frameIndex) {
+			@McpToolParam(required = false, description = "Frame index (0 = current frame, default: 0)") Integer frameIndex) {
 		try {
 			VirtualMachine vm = jdiService.getVM();
 			ThreadReference thread = findThread(vm, threadId);
@@ -261,7 +388,137 @@ public class JDWPTools {
 
 			return String.format("Result: %s", formatValue(result));
 		} catch (Exception e) {
-			return "Error evaluating expression: " + e.getMessage();
+			String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+			String enriched = enrichEvaluationError(msg, threadId, frameIndex);
+			return "Error evaluating expression: " + enriched;
+		}
+	}
+
+	@McpTool(description = "Evaluate a Java expression and compare its result against an expected value. Returns 'OK' on match, 'MISMATCH' with actual vs expected on failure. Comparison is string-based against the same formatting jdwp_evaluate_expression uses (so primitives auto-unbox, strings strip surrounding quotes).")
+	public String jdwp_assert_expression(
+			@McpToolParam(description = "Java expression (e.g., 'order.getTotal()', 'session.getRole()', 'list.size() == 5')") String expression,
+			@McpToolParam(description = "Expected value (string-compared against the formatted expression result)") String expected,
+			@McpToolParam(required = false, description = "Thread ID — defaults to the last breakpoint thread") Long threadId,
+			@McpToolParam(required = false, description = "Frame index (default: 0)") Integer frameIndex) {
+		try {
+			int frame = (frameIndex != null) ? frameIndex : 0;
+			ThreadReference thread;
+			if (threadId != null) {
+				thread = findThread(jdiService.getVM(), threadId);
+				if (thread == null) {
+					return "Error: Thread not found with ID " + threadId;
+				}
+			} else {
+				thread = breakpointTracker.getLastBreakpointThread();
+				if (thread == null) {
+					return "Error: No current breakpoint thread. Pass threadId or hit a breakpoint first.";
+				}
+			}
+			if (!thread.isSuspended()) {
+				return "Error: Thread is not suspended.";
+			}
+
+			expressionEvaluator.configureCompilerClasspath(thread);
+			StackFrame stackFrame = thread.frame(frame);
+			Value result = expressionEvaluator.evaluate(stackFrame, expression);
+			String actual = formatValue(result);
+
+			// Strip wrapping quotes from formatted strings so users can pass `expected="hello"` or `expected=hello`.
+			String compareActual = actual;
+			if (compareActual.length() >= 2 && compareActual.startsWith("\"") && compareActual.endsWith("\"")) {
+				compareActual = compareActual.substring(1, compareActual.length() - 1);
+			}
+
+			if (compareActual.equals(expected)) {
+				return String.format("OK — %s = %s", expression, actual);
+			}
+			return String.format("MISMATCH — %s\n  expected: %s\n  actual:   %s", expression, expected, actual);
+		} catch (Exception e) {
+			return "Error: " + e.getMessage();
+		}
+	}
+
+	/**
+	 * Pure regex extraction of an unresolved/invisible field name from a JDT compile error message.
+	 * Recognises three forms emitted by the Eclipse JDT compiler:
+	 * <ul>
+	 *   <li>{@code "X cannot be resolved"} — the wrapper class never saw the identifier</li>
+	 *   <li>{@code "field a.b.c.X is not visible"} — the wrapper class saw the field but visibility failed</li>
+	 *   <li>{@code "X is not visible"} — bare-name variant emitted by some compiler versions</li>
+	 * </ul>
+	 * Static + package-private so it can be unit-tested without a JDI connection.
+	 *
+	 * @param message the raw compiler error string
+	 * @return the field/identifier name if any of the three patterns match, otherwise {@code null}
+	 */
+	static String parseUnresolvedFieldName(String message) {
+		if (message == null) {
+			return null;
+		}
+		java.util.regex.Matcher m = java.util.regex.Pattern
+			.compile("([A-Za-z_][A-Za-z_0-9]*)\\s+cannot be resolved"
+				+ "|field\\s+\\S*?\\.([A-Za-z_][A-Za-z_0-9]*)\\s+is not visible"
+				+ "|([A-Za-z_][A-Za-z_0-9]*)\\s+is not visible")
+			.matcher(message);
+		if (!m.find()) {
+			return null;
+		}
+		return m.group(1) != null ? m.group(1)
+			: m.group(2) != null ? m.group(2)
+			: m.group(3);
+	}
+
+	/**
+	 * If the evaluator's error message looks like "X cannot be resolved" and X matches a field on
+	 * {@code this}'s declared type, append a hint explaining the package-private wrapper-class
+	 * limitation and pointing the user at {@code jdwp_get_fields(thisObjectId)}.
+	 */
+	private String enrichEvaluationError(String originalMessage, long threadId, Integer frameIndex) {
+		String unresolved = parseUnresolvedFieldName(originalMessage);
+		if (unresolved == null) {
+			return originalMessage;
+		}
+
+		try {
+			VirtualMachine vm = jdiService.getVM();
+			ThreadReference thread = findThread(vm, threadId);
+			if (thread == null || !thread.isSuspended()) {
+				return originalMessage;
+			}
+			StackFrame frame = thread.frame(frameIndex != null ? frameIndex : 0);
+			ObjectReference thisObj = frame.thisObject();
+			if (thisObj == null) {
+				return originalMessage;
+			}
+			Field field = thisObj.referenceType().allFields().stream()
+				.filter(f -> f.name().equals(unresolved))
+				.findFirst()
+				.orElse(null);
+			if (field == null) {
+				return originalMessage;
+			}
+			jdiService.cacheObject(thisObj);
+			String thisType = thisObj.referenceType().name();
+			boolean classIsPublic = thisObj.referenceType() instanceof ClassType ct && ct.isPublic();
+			boolean fieldIsPublic = field != null && field.isPublic();
+			StringBuilder hint = new StringBuilder(originalMessage);
+			hint.append("\n\nHint: '").append(unresolved).append("' is a field on this (")
+				.append(thisType).append(", Object#").append(thisObj.uniqueID()).append(").");
+			if (classIsPublic && fieldIsPublic) {
+				hint.append(" Auto-rewrite should have handled this — please report the expression that triggered it.");
+			} else {
+				if (!classIsPublic) {
+					hint.append(" The enclosing class is package-private (or non-public),");
+				} else {
+					hint.append(" The field is non-public,");
+				}
+				hint.append(" so the expression wrapper cannot reference it directly. Workaround:")
+					.append(" call jdwp_get_fields(").append(thisObj.uniqueID()).append(")")
+					.append(" to inspect the field, or jdwp_to_string for a quick view.");
+			}
+			return hint.toString();
+		} catch (Exception probeFailure) {
+			return originalMessage;
 		}
 	}
 
@@ -271,6 +528,40 @@ public class JDWPTools {
 			VirtualMachine vm = jdiService.getVM();
 			vm.resume();
 			return "All threads resumed";
+		} catch (Exception e) {
+			return "Error: " + e.getMessage();
+		}
+	}
+
+	@McpTool(description = "Resume the VM and BLOCK until the next breakpoint, step, or exception event fires (or timeout). Returns the same info as jdwp_get_current_thread on success. Replaces the manual 'resume → poll → poll' choreography.")
+	public String jdwp_resume_until_event(
+			@McpToolParam(required = false, description = "Maximum wait time in milliseconds (default: 30000)") Integer timeoutMs) {
+		int deadlineMs = (timeoutMs != null && timeoutMs > 0) ? timeoutMs : 30_000;
+		try {
+			VirtualMachine vm = jdiService.getVM();
+			// Arm BEFORE resume so we don't race with a near-instant event firing.
+			java.util.concurrent.CountDownLatch latch = breakpointTracker.armNextEventLatch();
+			vm.resume();
+
+			boolean fired = latch.await(deadlineMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+			if (!fired) {
+				return String.format("[TIMEOUT] No event fired within %dms after resume.\n" +
+					"The VM is still running. You can call jdwp_resume_until_event again with a larger timeout, " +
+					"or use jdwp_get_threads to see live thread state.", deadlineMs);
+			}
+
+			ThreadReference thread = breakpointTracker.getLastBreakpointThread();
+			if (thread == null) {
+				return "Event fired but no breakpoint thread recorded (this should not happen — check the listener logs).";
+			}
+			Integer bpId = breakpointTracker.getLastBreakpointId();
+			return String.format("Event fired. Thread: %s (ID=%d, suspended=%s, frames=%d, breakpoint=%s)",
+				thread.name(), thread.uniqueID(), thread.isSuspended(),
+				thread.isSuspended() ? thread.frameCount() : -1,
+				bpId != null ? String.valueOf(bpId) : "unknown");
+		} catch (InterruptedException ie) {
+			Thread.currentThread().interrupt();
+			return "Wait interrupted";
 		} catch (Exception e) {
 			return "Error: " + e.getMessage();
 		}
@@ -431,8 +722,8 @@ public class JDWPTools {
 	public String jdwp_set_breakpoint(
 			@McpToolParam(description = "Fully qualified class name (e.g. 'com.example.MyClass')") String className,
 			@McpToolParam(description = "Line number") int lineNumber,
-			@McpToolParam(description = "Suspend policy: 'all' (default), 'thread', 'none'") String suspendPolicy,
-			@McpToolParam(description = "Optional condition — only suspend when this evaluates to true (e.g., 'i > 100')") String condition) {
+			@McpToolParam(required = false, description = "Suspend policy: 'all' (default), 'thread', 'none'") String suspendPolicy,
+			@McpToolParam(required = false, description = "Optional condition — only suspend when this evaluates to true (e.g., 'i > 100')") String condition) {
 		try {
 			VirtualMachine vm = jdiService.getVM();
 			com.sun.jdi.request.EventRequestManager erm = vm.eventRequestManager();
@@ -734,7 +1025,7 @@ public class JDWPTools {
 	}
 
 	@McpTool(description = "Get recent JDWP events (breakpoints, steps, exceptions, logpoints, etc.)")
-	public String jdwp_get_events(@McpToolParam(description = "Number of recent events to retrieve (default: 20, max: 100)") Integer count) {
+	public String jdwp_get_events(@McpToolParam(required = false, description = "Number of recent events to retrieve (default: 20, max: 100)") Integer count) {
 		try {
 			if (count == null || count <= 0) count = 20;
 			if (count > 100) count = 100;
@@ -776,8 +1067,8 @@ public class JDWPTools {
 	@McpTool(description = "Set a breakpoint that triggers when a specific exception is thrown. If the exception class is not yet loaded, the breakpoint is deferred and will activate automatically when the JVM loads it.")
 	public String jdwp_set_exception_breakpoint(
 			@McpToolParam(description = "Exception class name (e.g., 'java.lang.NullPointerException', 'java.lang.Exception' for all)") String exceptionClass,
-			@McpToolParam(description = "Break on caught exceptions (default: true)") Boolean caught,
-			@McpToolParam(description = "Break on uncaught exceptions (default: true)") Boolean uncaught) {
+			@McpToolParam(required = false, description = "Break on caught exceptions (default: true)") Boolean caught,
+			@McpToolParam(required = false, description = "Break on uncaught exceptions (default: true)") Boolean uncaught) {
 		try {
 			if (caught == null) caught = true;
 			if (uncaught == null) uncaught = true;
@@ -872,6 +1163,36 @@ public class JDWPTools {
 		}
 	}
 
+	@McpTool(description = "Clear ALL session state (breakpoints, exception breakpoints, watchers, object cache, event history) WITHOUT disconnecting from the target VM. Use between sequential debugging scenarios against the same long-running target.")
+	public String jdwp_reset() {
+		try {
+			VirtualMachine vm = jdiService.getVM();
+
+			int activeBp = breakpointTracker.getAllBreakpoints().size();
+			int pendingBp = breakpointTracker.getAllPendingBreakpoints().size();
+			int activeExBp = breakpointTracker.getAllExceptionBreakpoints().size();
+			int pendingExBp = breakpointTracker.getAllPendingExceptionBreakpoints().size();
+			int watchers = watcherManager.getAllWatchers().size();
+			int events = eventHistory.size();
+
+			breakpointTracker.clearAll(vm.eventRequestManager());
+			watcherManager.clearAll();
+			jdiService.clearObjectCache();
+			eventHistory.clear();
+
+			return String.format(
+				"Reset complete (VM connection preserved).\n" +
+				"  Breakpoints cleared:           %d active + %d pending\n" +
+				"  Exception breakpoints cleared: %d active + %d pending\n" +
+				"  Watchers cleared:              %d\n" +
+				"  Event history cleared:         %d entries\n" +
+				"  Object cache cleared.",
+				activeBp, pendingBp, activeExBp, pendingExBp, watchers, events);
+		} catch (Exception e) {
+			return "Error: " + e.getMessage();
+		}
+	}
+
 	@McpTool(description = "Clear ALL breakpoints (active and pending) set by this MCP server")
 	public String jdwp_clear_all_breakpoints() {
 		try {
@@ -901,6 +1222,90 @@ public class JDWPTools {
 
 	private String formatValue(Value value) {
 		return jdiService.formatFieldValue(value);
+	}
+
+	@McpTool(description = "One-shot debugging context at the current breakpoint: thread, top frames, locals at frame 0, and 'this' field dump. Use this instead of the four-call sequence (get_current_thread → get_stack → get_locals → get_fields(this)) at every BP hit.")
+	public String jdwp_get_breakpoint_context(
+			@McpToolParam(required = false, description = "Max stack frames to render (default: 5). Junit/maven/reflection frames are always collapsed.") Integer maxFrames,
+			@McpToolParam(required = false, description = "Include the 'this' field dump (default: true)") Boolean includeThisFields) {
+		int frameLimit = (maxFrames != null && maxFrames > 0) ? maxFrames : 5;
+		boolean includeThis = includeThisFields == null || includeThisFields;
+
+		try {
+			ThreadReference thread = breakpointTracker.getLastBreakpointThread();
+			if (thread == null) {
+				return "No current breakpoint detected. Set a breakpoint and trigger it first.";
+			}
+			if (!thread.isSuspended()) {
+				return String.format("Thread %s (ID=%d) is no longer suspended.", thread.name(), thread.uniqueID());
+			}
+
+			Integer bpId = breakpointTracker.getLastBreakpointId();
+			StringBuilder sb = new StringBuilder();
+			sb.append("=== Breakpoint Context ===\n");
+			sb.append(String.format("Thread: %s (ID=%d, breakpoint=%s)\n\n",
+				thread.name(), thread.uniqueID(),
+				bpId != null ? String.valueOf(bpId) : "unknown"));
+
+			// Top frames (junit/maven/reflection collapsed via the same noise list as jdwp_get_stack)
+			List<StackFrame> frames = thread.frames();
+			sb.append(String.format("--- Top frames (showing up to %d, %d total) ---\n", frameLimit, frames.size()));
+			appendUserFrames(sb, frames, frameLimit, "  ");
+
+			if (frames.isEmpty()) {
+				sb.append("\n(thread has no frames — possibly suspended at VM startup before any user code)\n");
+				return sb.toString();
+			}
+			sb.append("\n");
+
+			// Locals at frame 0 (with synthetic 'this' the same way jdwp_get_locals does it)
+			StackFrame frame0 = frames.get(0);
+			sb.append("--- Locals at frame 0 ---\n");
+			ObjectReference thisObj = frame0.thisObject();
+			if (thisObj != null) {
+				sb.append(String.format("  this (%s) = %s\n",
+					thisObj.referenceType().name(), formatValue(thisObj)));
+			}
+			try {
+				Map<LocalVariable, Value> vars = frame0.getValues(frame0.visibleVariables());
+				if (vars.isEmpty() && thisObj == null) {
+					sb.append("  (none)\n");
+				}
+				for (Map.Entry<LocalVariable, Value> e : vars.entrySet()) {
+					sb.append(String.format("  %s (%s) = %s\n",
+						e.getKey().name(), e.getKey().typeName(), formatValue(e.getValue())));
+				}
+			} catch (AbsentInformationException e) {
+				sb.append("  (no debug info — compile with -g)\n");
+			}
+			sb.append("\n");
+
+			// 'this' field dump — instance fields only. Static fields are class-level state and
+			// would clutter the dump (e.g. constant tables like PRICE_CATALOG showing up under
+			// every instance) without telling the user anything about THIS object.
+			if (includeThis && thisObj != null) {
+				jdiService.cacheObject(thisObj);
+				sb.append(String.format("--- this fields (Object#%d, %s) ---\n",
+					thisObj.uniqueID(), thisObj.referenceType().name()));
+				List<Field> instanceFields = thisObj.referenceType().allFields().stream()
+					.filter(f -> !f.isStatic())
+					.toList();
+				if (instanceFields.isEmpty()) {
+					sb.append("  (no instance fields)\n");
+				} else {
+					for (Field field : instanceFields) {
+						Value v = thisObj.getValue(field);
+						sb.append(String.format("  %s %s = %s\n", field.typeName(), field.name(), formatValue(v)));
+					}
+				}
+			} else if (includeThis) {
+				sb.append("--- this --- (static method, no this)\n");
+			}
+
+			return sb.toString();
+		} catch (Exception e) {
+			return "Error: " + e.getMessage();
+		}
 	}
 
 	@McpTool(description = "Get the thread ID of the current breakpoint")

@@ -39,6 +39,19 @@ public class BreakpointTracker {
 	private volatile ThreadReference lastBreakpointThread;
 	private volatile Integer lastBreakpointId;
 
+	/**
+	 * Single-shot latch backing {@link io.mcp.jdwp.JDWPTools#jdwp_resume_until_event(Integer)}.
+	 * Lifecycle: armed by {@link #armNextEventLatch()} immediately before {@code vm.resume()},
+	 * counted down by {@link #fireNextEvent()} from the JDI listener thread when the next
+	 * suspending event (BP / step / exception) lands, and released-then-cleared by
+	 * {@link #clearAll(EventRequestManager)} / {@link #reset()} so a {@code jdwp_reset} or
+	 * {@code jdwp_disconnect} from another caller does not leave a waiter hanging.
+	 *
+	 * <p>{@code volatile} for cross-thread visibility; mutating methods that touch the field
+	 * are {@code synchronized} so the arm-then-fire ordering is atomic.
+	 */
+	private volatile java.util.concurrent.CountDownLatch nextEventLatch;
+
 	// ── Active breakpoint operations ──
 
 	/**
@@ -127,8 +140,13 @@ public class BreakpointTracker {
 
 	/**
 	 * Clear all tracked breakpoints (active + pending) and delete their JDI event requests.
+	 * Also releases any pending {@code resume_until_event} waiter so a {@code jdwp_reset}
+	 * from another caller does not leave it hanging until timeout.
 	 */
 	public synchronized void clearAll(EventRequestManager erm) {
+		// Release any awaiter BEFORE we touch the rest of the state — the awaiter would
+		// otherwise hang for the full timeout window.
+		fireNextEvent();
 		for (BreakpointRequest bp : breakpointsById.values()) {
 			try {
 				erm.deleteEventRequest(bp);
@@ -472,9 +490,41 @@ public class BreakpointTracker {
 	}
 
 	/**
+	 * Arms a fresh single-shot latch that will be released the next time {@link #fireNextEvent()}
+	 * is called. Returns the latch — callers should arm BEFORE resuming the VM and then await on
+	 * the returned latch to avoid the race where the event fires between resume and arm.
+	 *
+	 * <p>Used by {@link io.mcp.jdwp.JDWPTools#jdwp_resume_until_event(Integer)} to implement
+	 * synchronous "resume and wait for next stop". Replaces any previously-armed latch.
+	 */
+	public synchronized java.util.concurrent.CountDownLatch armNextEventLatch() {
+		this.nextEventLatch = new java.util.concurrent.CountDownLatch(1);
+		return this.nextEventLatch;
+	}
+
+	/**
+	 * Releases the currently-armed latch (if any) and clears it. Called by {@link io.mcp.jdwp.JdiEventListener}
+	 * after every BP/step/exception event so that {@code jdwp_resume_until_event} can return.
+	 *
+	 * <p>{@code synchronized} so an arm + fire pair is atomic — without this lock, the JDI
+	 * listener thread could read a stale {@code nextEventLatch}, count down the wrong latch,
+	 * and leave a fresh awaiter hanging.
+	 */
+	public synchronized void fireNextEvent() {
+		java.util.concurrent.CountDownLatch latch = this.nextEventLatch;
+		if (latch != null) {
+			latch.countDown();
+			this.nextEventLatch = null;
+		}
+	}
+
+	/**
 	 * Reset all state (called on disconnect).
 	 */
 	public synchronized void reset() {
+		// Release any awaiter BEFORE we drop the latch reference — otherwise a thread parked
+		// in jdwp_resume_until_event would block until its timeout.
+		fireNextEvent();
 		breakpointsById.clear();
 		pendingBreakpointsById.clear();
 		breakpointMetadata.clear();
