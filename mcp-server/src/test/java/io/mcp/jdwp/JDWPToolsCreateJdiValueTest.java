@@ -42,7 +42,7 @@ class JDWPToolsCreateJdiValueTest {
 		WatcherManager watcherManager = mock(WatcherManager.class);
 		JdiExpressionEvaluator evaluator = mock(JdiExpressionEvaluator.class);
 		EventHistory eventHistory = mock(EventHistory.class);
-		tools = new JDWPTools(jdiService, tracker, watcherManager, evaluator, eventHistory);
+		tools = new JDWPTools(jdiService, tracker, watcherManager, evaluator, eventHistory, new EvaluationGuard());
 		vm = mock(VirtualMachine.class);
 	}
 

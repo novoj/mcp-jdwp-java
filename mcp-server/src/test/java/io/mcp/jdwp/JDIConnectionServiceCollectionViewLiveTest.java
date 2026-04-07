@@ -40,7 +40,7 @@ class JDIConnectionServiceCollectionViewLiveTest {
 		BreakpointTracker tracker = new BreakpointTracker();
 		EventHistory eventHistory = new EventHistory();
 		WatcherManager watcherManager = new WatcherManager();
-		service = new JDIConnectionService(listener, tracker, eventHistory, watcherManager);
+		service = new JDIConnectionService(listener, tracker, eventHistory, watcherManager, new EvaluationGuard());
 	}
 
 	/**

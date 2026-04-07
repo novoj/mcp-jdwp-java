@@ -46,16 +46,19 @@ public class JdiEventListener {
 	private final BreakpointTracker breakpointTracker;
 	private final EventHistory eventHistory;
 	private final JdiExpressionEvaluator expressionEvaluator;
+	private final EvaluationGuard evaluationGuard;
 	/** Daemon thread running {@link #listen}; replaced on each {@link #start}, nulled by {@link #stop}. */
 	private volatile Thread listenerThread;
 	/** Loop control flag; flipped to false by {@link #stop} or by VM disconnect/death events. */
 	private volatile boolean running;
 
 	public JdiEventListener(BreakpointTracker breakpointTracker, EventHistory eventHistory,
-							@Lazy JdiExpressionEvaluator expressionEvaluator) {
+							@Lazy JdiExpressionEvaluator expressionEvaluator,
+							EvaluationGuard evaluationGuard) {
 		this.breakpointTracker = breakpointTracker;
 		this.eventHistory = eventHistory;
 		this.expressionEvaluator = expressionEvaluator;
+		this.evaluationGuard = evaluationGuard;
 	}
 
 	/**
@@ -105,11 +108,13 @@ public class JdiEventListener {
 							shouldSuspend = true;
 						}
 					} else if (event instanceof StepEvent stepEvent) {
-						handleStepEvent(stepEvent);
-						shouldSuspend = true;
+						if (handleStepEvent(stepEvent)) {
+							shouldSuspend = true;
+						}
 					} else if (event instanceof ExceptionEvent exEvent) {
-						handleExceptionEvent(exEvent);
-						shouldSuspend = true;
+						if (handleExceptionEvent(exEvent)) {
+							shouldSuspend = true;
+						}
 					} else if (event instanceof ClassPrepareEvent cpEvent) {
 						handleClassPrepareEvent(cpEvent);
 					} else if (event instanceof VMStartEvent) {
@@ -167,6 +172,27 @@ public class JdiEventListener {
 	 */
 	private boolean handleBreakpointEvent(BreakpointEvent event) {
 		try {
+			// Reentrancy guard: if the firing thread is already executing an MCP-driven
+			// invokeMethod chain (expression evaluation, logpoint expression, conditional BP
+			// expression, jdwp_to_string, force-load, classpath discovery), suppress the
+			// recursive hit and auto-resume. Otherwise the outer invokeMethod would wait
+			// forever for a thread we just re-suspended — that is the deadlock the guard
+			// exists to prevent. Must run BEFORE setLastBreakpointThread / fireNextEvent so
+			// the suppressed event does not clobber the user's current context or wake a
+			// waiter on jdwp_resume_until_event.
+			if (evaluationGuard.isEvaluating(event.thread())) {
+				String className = event.location().declaringType().name();
+				int lineNumber = event.location().lineNumber();
+				eventHistory.record(new EventHistory.DebugEvent("BREAKPOINT_SUPPRESSED",
+					String.format("Recursive BP at %s:%d suppressed (thread '%s' inside MCP evaluation)",
+						className, lineNumber, event.thread().name()),
+					Map.of("class", className, "line", String.valueOf(lineNumber),
+						"thread", event.thread().name())));
+				log.info("[JDI] Suppressing recursive BP at {}:{} on thread {} (inside MCP evaluation)",
+					className, lineNumber, event.thread().name());
+				return false;
+			}
+
 			BreakpointRequest request = (BreakpointRequest) event.request();
 			Integer bpId = breakpointTracker.findIdByRequest(request);
 
@@ -228,12 +254,36 @@ public class JdiEventListener {
 	 * (JDI convention — step requests are consumed after firing), recording a `STEP` event in
 	 * {@link EventHistory}, and firing the resume-until-event latch so a waiting `jdwp_resume_until_event`
 	 * call can return.
+	 *
+	 * <p>Returns {@code true} when the firing thread should stay suspended, {@code false} when the
+	 * step event was suppressed by the reentrancy guard (defensive — JDI does not deliver step
+	 * events from inside {@code invokeMethod} in practice, but the guard covers the case anyway).
 	 */
-	private void handleStepEvent(StepEvent event) {
+	private boolean handleStepEvent(StepEvent event) {
 		// Some legacy JDI providers deliver step events with a null request reference (already
 		// auto-removed by the provider) — guard before calling deleteEventRequest.
 		if (event.request() != null) {
 			event.request().virtualMachine().eventRequestManager().deleteEventRequest(event.request());
+		}
+
+		// Reentrancy guard — see handleBreakpointEvent for the rationale. JDI is not supposed to
+		// deliver step events during invokeMethod but we suppress defensively so a future JDI
+		// implementation change can never turn this path into a deadlock.
+		if (evaluationGuard.isEvaluating(event.thread())) {
+			try {
+				String className = event.location().declaringType().name();
+				int lineNumber = event.location().lineNumber();
+				eventHistory.record(new EventHistory.DebugEvent("STEP_SUPPRESSED",
+					String.format("Step at %s:%d suppressed (thread '%s' inside MCP evaluation)",
+						className, lineNumber, event.thread().name()),
+					Map.of("class", className, "line", String.valueOf(lineNumber),
+						"thread", event.thread().name())));
+				log.info("[JDI] Suppressing step event at {}:{} on thread {} (inside MCP evaluation)",
+					className, lineNumber, event.thread().name());
+			} catch (Exception e) {
+				log.debug("[JDI] Error recording suppressed step event: {}", e.getMessage());
+			}
+			return false;
 		}
 
 		try {
@@ -248,6 +298,7 @@ public class JdiEventListener {
 		} catch (Exception e) {
 			log.debug("[JDI] Error recording step event: {}", e.getMessage());
 		}
+		return true;
 	}
 
 	/**
@@ -255,8 +306,34 @@ public class JdiEventListener {
 	 * metadata and routing the firing thread through {@link BreakpointTracker#setLastBreakpointThread}
 	 * with the sentinel BP id `-1`. The sentinel lets `jdwp_get_current_thread` and the
 	 * `findSuspendedThread` fallback locate the thread without needing a real breakpoint id.
+	 *
+	 * <p>Returns {@code true} when the firing thread should stay suspended, {@code false} when the
+	 * exception was suppressed by the reentrancy guard — an expression evaluation that throws
+	 * must not cause the outer {@code invokeMethod} to hang on a re-suspended thread. The
+	 * exception still surfaces to the caller via the usual JDI {@link InvocationException}
+	 * channel, so the user sees their expression error.
 	 */
-	private void handleExceptionEvent(ExceptionEvent event) {
+	private boolean handleExceptionEvent(ExceptionEvent event) {
+		// Reentrancy guard — an exception breakpoint that fires while the firing thread is
+		// already inside an MCP-driven invokeMethod chain must NOT re-suspend the thread, or
+		// the outer invocation deadlocks. The exception still propagates back to the caller
+		// through JDI's normal InvocationException channel, so no information is lost.
+		if (evaluationGuard.isEvaluating(event.thread())) {
+			try {
+				String exceptionType = event.exception().referenceType().name();
+				String threadName = event.thread().name();
+				eventHistory.record(new EventHistory.DebugEvent("EXCEPTION_SUPPRESSED",
+					String.format("Exception %s on thread '%s' suppressed (inside MCP evaluation)",
+						exceptionType, threadName),
+					Map.of("exceptionType", exceptionType, "thread", threadName)));
+				log.info("[JDI] Suppressing exception {} on thread {} (inside MCP evaluation)",
+					exceptionType, threadName);
+			} catch (Exception e) {
+				log.debug("[JDI] Error recording suppressed exception event: {}", e.getMessage());
+			}
+			return false;
+		}
+
 		try {
 			ObjectReference exception = event.exception();
 			Location throwLocation = event.location();
@@ -283,6 +360,7 @@ public class JdiEventListener {
 		} catch (Exception e) {
 			log.warn("[JDI] Error handling exception event: {}", e.getMessage());
 		}
+		return true;
 	}
 
 	/**

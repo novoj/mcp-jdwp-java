@@ -47,7 +47,7 @@ class JDWPToolsBugCaptureTest {
 		watcherManager = mock(WatcherManager.class);
 		evaluator = mock(JdiExpressionEvaluator.class);
 		eventHistory = mock(EventHistory.class);
-		tools = new JDWPTools(jdiService, breakpointTracker, watcherManager, evaluator, eventHistory);
+		tools = new JDWPTools(jdiService, breakpointTracker, watcherManager, evaluator, eventHistory, new EvaluationGuard());
 	}
 
 	/**

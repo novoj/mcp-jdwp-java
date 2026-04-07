@@ -51,6 +51,7 @@ public class JDWPTools {
 	private final WatcherManager watcherManager;
 	private final JdiExpressionEvaluator expressionEvaluator;
 	private final EventHistory eventHistory;
+	private final EvaluationGuard evaluationGuard;
 
 	/**
 	 * Default JDWP port. Resolved at class load via the `-DJVM_JDWP_PORT` system property
@@ -78,12 +79,13 @@ public class JDWPTools {
 
 	public JDWPTools(JDIConnectionService jdiService, BreakpointTracker breakpointTracker,
 					 WatcherManager watcherManager, JdiExpressionEvaluator expressionEvaluator,
-					 EventHistory eventHistory) {
+					 EventHistory eventHistory, EvaluationGuard evaluationGuard) {
 		this.jdiService = jdiService;
 		this.breakpointTracker = breakpointTracker;
 		this.watcherManager = watcherManager;
 		this.expressionEvaluator = expressionEvaluator;
 		this.eventHistory = eventHistory;
+		this.evaluationGuard = evaluationGuard;
 	}
 
 	@McpTool(description = "Connect to the JDWP server using configuration from .mcp.json")
@@ -387,8 +389,19 @@ public class JDWPTools {
 				return String.format("Object #%d (%s): no toString() method found", objectId, obj.referenceType().name());
 			}
 
-			Value result = obj.invokeMethod(thread, toStringMethod, Collections.emptyList(),
-				ObjectReference.INVOKE_SINGLE_THREADED);
+			// Reentrancy guard: the invoked toString() may hit a user breakpoint. Mark the
+			// thread as mid-evaluation so the listener suppresses the recursive hit rather
+			// than re-suspending the very thread this invokeMethod is waiting on. Capture the
+			// id up front so a thread death during toString() does not leak a guard entry.
+			Value result;
+			long guardedThreadId = thread.uniqueID();
+			evaluationGuard.enter(guardedThreadId);
+			try {
+				result = obj.invokeMethod(thread, toStringMethod, Collections.emptyList(),
+					ObjectReference.INVOKE_SINGLE_THREADED);
+			} finally {
+				evaluationGuard.exit(guardedThreadId);
+			}
 
 			if (result instanceof StringReference strRef) {
 				return String.format("Object #%d (%s).toString() = \"%s\"",

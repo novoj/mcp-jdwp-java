@@ -40,6 +40,7 @@ public class JDIConnectionService {
 	private final BreakpointTracker breakpointTracker;
 	private final EventHistory eventHistory;
 	private final WatcherManager watcherManager;
+	private final EvaluationGuard evaluationGuard;
 
 	private VirtualMachine vm;
 	private String lastHost;
@@ -53,11 +54,13 @@ public class JDIConnectionService {
 	private final Map<Long, ObjectReference> objectCache = new ConcurrentHashMap<>();
 
 	public JDIConnectionService(JdiEventListener eventListener, BreakpointTracker breakpointTracker,
-								EventHistory eventHistory, WatcherManager watcherManager) {
+								EventHistory eventHistory, WatcherManager watcherManager,
+								EvaluationGuard evaluationGuard) {
 		this.eventListener = eventListener;
 		this.breakpointTracker = breakpointTracker;
 		this.eventHistory = eventHistory;
 		this.watcherManager = watcherManager;
+		this.evaluationGuard = evaluationGuard;
 	}
 
 	/**
@@ -869,7 +872,17 @@ public class JDIConnectionService {
 			}
 
 			StringReference nameRef = vm.mirrorOf(className);
-			classClass.invokeMethod(thread, forName, java.util.List.of(nameRef), ClassType.INVOKE_SINGLE_THREADED);
+			// Reentrancy guard: forcing Class.forName runs the target class's <clinit>, which
+			// may hit a user breakpoint. Without the guard the listener would re-suspend the
+			// thread we are driving and the outer invokeMethod would hang. Capture the id up
+			// front so a thread death during <clinit> does not leak a guard entry.
+			long guardedThreadId = thread.uniqueID();
+			evaluationGuard.enter(guardedThreadId);
+			try {
+				classClass.invokeMethod(thread, forName, java.util.List.of(nameRef), ClassType.INVOKE_SINGLE_THREADED);
+			} finally {
+				evaluationGuard.exit(guardedThreadId);
+			}
 			log.info("[JDI] Force-loaded class '{}' via Class.forName", className);
 
 			List<ReferenceType> retry = vm.classesByName(className);

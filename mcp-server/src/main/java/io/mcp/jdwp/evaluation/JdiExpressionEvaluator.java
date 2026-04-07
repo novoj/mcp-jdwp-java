@@ -1,5 +1,6 @@
 package io.mcp.jdwp.evaluation;
 
+import io.mcp.jdwp.EvaluationGuard;
 import io.mcp.jdwp.evaluation.exceptions.JdiEvaluationException;
 import io.mcp.jdwp.JDIConnectionService;
 import com.sun.jdi.*;
@@ -53,6 +54,7 @@ public class JdiExpressionEvaluator {
 	private final InMemoryJavaCompiler compiler;
 	private final RemoteCodeExecutor remoteCodeExecutor;
 	private final JDIConnectionService jdiConnectionService;
+	private final EvaluationGuard evaluationGuard;
 
 	/**
 	 * Compilation cache. Key is `contextSignature + "###" + expression`, so two frames with the
@@ -64,10 +66,12 @@ public class JdiExpressionEvaluator {
 
 	public JdiExpressionEvaluator(InMemoryJavaCompiler compiler,
 								   RemoteCodeExecutor remoteCodeExecutor,
-								   JDIConnectionService jdiConnectionService) {
+								   JDIConnectionService jdiConnectionService,
+								   EvaluationGuard evaluationGuard) {
 		this.compiler = compiler;
 		this.remoteCodeExecutor = remoteCodeExecutor;
 		this.jdiConnectionService = jdiConnectionService;
+		this.evaluationGuard = evaluationGuard;
 	}
 
 	/**
@@ -83,6 +87,18 @@ public class JdiExpressionEvaluator {
 	 * @throws JdiEvaluationException wrapping any underlying compilation, classloader, or invocation failure
 	 */
 	public Value evaluate(StackFrame frame, String expression) throws JdiEvaluationException {
+		// Reentrancy guard: mark the firing thread as mid-evaluation BEFORE touching JDI so the
+		// event listener suppresses any recursive breakpoint / exception event that fires while
+		// we are inside the invokeMethod chain (defineClass / forName / user wrapper method /
+		// findClassLoader's getSystemClassLoader fallback). The guard is counted, so a nested
+		// call — e.g. from a conditional breakpoint expression — safely stacks onto an enclosing
+		// enter.
+		//
+		// Capture uniqueID up front and pass the long to both enter and exit. If the target
+		// thread dies mid-evaluation, re-querying uniqueID() on the dead ThreadReference would
+		// throw ObjectCollectedException and leak a dangling entry in the guard's depth map.
+		long guardedThreadId = frame.thread().uniqueID();
+		evaluationGuard.enter(guardedThreadId);
 		try {
 			// NOTE: Classpath configuration must be done BEFORE calling evaluate() to avoid nested JDI calls
 			// The caller (e.g., jdwp_evaluate_watchers) is responsible for calling configureCompilerClasspath()
@@ -179,6 +195,8 @@ public class JdiExpressionEvaluator {
 				throw jdiEx;
 			}
 			throw new JdiEvaluationException("Expression evaluation failed: " + e.getMessage(), e);
+		} finally {
+			evaluationGuard.exit(guardedThreadId);
 		}
 	}
 
@@ -615,33 +633,43 @@ public class JdiExpressionEvaluator {
 			return;
 		}
 
-		// New connection or reconnect — clear stale compilation cache
-		compilationCache.clear();
-
-		long startTime = System.currentTimeMillis();
-
+		// Reentrancy guard: discoverClasspath walks the target-VM classloader hierarchy via
+		// invokeMethod calls. If any of those invocations land on a breakpointed line the
+		// listener must suppress the hit rather than re-suspend the thread we are driving.
+		// Capture uniqueID up front so a thread death mid-discovery does not leak a map entry.
+		long guardedThreadId = suspendedThread.uniqueID();
+		evaluationGuard.enter(guardedThreadId);
 		try {
-			String classpath = jdiConnectionService.discoverClasspath(suspendedThread);
-			String jdkPath = jdiConnectionService.getDiscoveredJdkPath();
+			// New connection or reconnect — clear stale compilation cache
+			compilationCache.clear();
 
-			if (jdkPath == null) {
-				log.error("[Evaluator] JDK path not discovered, cannot configure compiler");
-				return;
-			}
+			long startTime = System.currentTimeMillis();
 
-			int version = jdiConnectionService.getTargetMajorVersion();
-			if (classpath != null && !classpath.isEmpty()) {
-				compiler.configure(jdkPath, classpath, version);
+			try {
+				String classpath = jdiConnectionService.discoverClasspath(suspendedThread);
+				String jdkPath = jdiConnectionService.getDiscoveredJdkPath();
 
+				if (jdkPath == null) {
+					log.error("[Evaluator] JDK path not discovered, cannot configure compiler");
+					return;
+				}
+
+				int version = jdiConnectionService.getTargetMajorVersion();
+				if (classpath != null && !classpath.isEmpty()) {
+					compiler.configure(jdkPath, classpath, version);
+
+					long elapsed = System.currentTimeMillis() - startTime;
+					log.info("[Evaluator] Compiler configured in {}ms", elapsed);
+				} else {
+					log.error("[Evaluator] Failed to discover classpath, expression evaluation may fail for application classes");
+				}
+
+			} catch (Exception e) {
 				long elapsed = System.currentTimeMillis() - startTime;
-				log.info("[Evaluator] Compiler configured in {}ms", elapsed);
-			} else {
-				log.error("[Evaluator] Failed to discover classpath, expression evaluation may fail for application classes");
+				log.error("[Evaluator] Error configuring classpath after {}ms", elapsed, e);
 			}
-
-		} catch (Exception e) {
-			long elapsed = System.currentTimeMillis() - startTime;
-			log.error("[Evaluator] Error configuring classpath after {}ms", elapsed, e);
+		} finally {
+			evaluationGuard.exit(guardedThreadId);
 		}
 	}
 }

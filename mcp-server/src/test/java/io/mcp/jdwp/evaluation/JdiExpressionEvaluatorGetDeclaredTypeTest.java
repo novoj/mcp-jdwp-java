@@ -3,6 +3,7 @@ package io.mcp.jdwp.evaluation;
 import com.sun.jdi.ArrayType;
 import com.sun.jdi.ClassType;
 import com.sun.jdi.ReferenceType;
+import io.mcp.jdwp.EvaluationGuard;
 import io.mcp.jdwp.JDIConnectionService;
 import io.mcp.jdwp.TestReflectionUtils;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,7 +30,7 @@ class JdiExpressionEvaluatorGetDeclaredTypeTest {
 		InMemoryJavaCompiler compiler = mock(InMemoryJavaCompiler.class);
 		RemoteCodeExecutor executor = mock(RemoteCodeExecutor.class);
 		JDIConnectionService jdiService = mock(JDIConnectionService.class);
-		evaluator = new JdiExpressionEvaluator(compiler, executor, jdiService);
+		evaluator = new JdiExpressionEvaluator(compiler, executor, jdiService, new EvaluationGuard());
 	}
 
 	@Nested
