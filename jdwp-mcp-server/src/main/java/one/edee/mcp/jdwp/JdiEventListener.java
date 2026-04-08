@@ -9,6 +9,7 @@ import com.sun.jdi.request.EventRequestManager;
 import com.sun.jdi.request.ExceptionRequest;
 import one.edee.mcp.jdwp.evaluation.JdiExpressionEvaluator;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
@@ -48,6 +49,7 @@ public class JdiEventListener {
 	private final JdiExpressionEvaluator expressionEvaluator;
 	private final EvaluationGuard evaluationGuard;
 	/** Daemon thread running {@link #listen}; replaced on each {@link #start}, nulled by {@link #stop}. */
+	@Nullable
 	private volatile Thread listenerThread;
 	/** Loop control flag; flipped to false by {@link #stop} or by VM disconnect/death events. */
 	private volatile boolean running;

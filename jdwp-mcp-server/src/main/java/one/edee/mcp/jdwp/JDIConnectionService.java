@@ -5,6 +5,7 @@ import com.sun.jdi.connect.*;
 import lombok.extern.slf4j.Slf4j;
 import one.edee.mcp.jdwp.evaluation.InMemoryJavaCompiler;
 import one.edee.mcp.jdwp.evaluation.JdkDiscoveryService;
+import org.jspecify.annotations.Nullable;
 import org.springframework.stereotype.Service;
 
 import one.edee.mcp.jdwp.evaluation.ClasspathDiscoverer;
@@ -14,6 +15,7 @@ import one.edee.mcp.jdwp.watchers.WatcherManager;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -44,7 +46,9 @@ public class JDIConnectionService {
 	private final WatcherManager watcherManager;
 	private final EvaluationGuard evaluationGuard;
 
+	@Nullable
 	private VirtualMachine vm;
+	@Nullable
 	private String lastHost;
 	private int lastPort = 0;
 
@@ -69,6 +73,7 @@ public class JDIConnectionService {
 	 * Cached path-separated classpath of the target JVM. Populated by {@link #discoverClasspath}
 	 * on the first successful call and reused thereafter; cleared on disconnect.
 	 */
+	@Nullable
 	private volatile String cachedClasspath;
 
 	/**
@@ -76,6 +81,7 @@ public class JDIConnectionService {
 	 * {@link #discoverClasspath} and consumed by {@link InMemoryJavaCompiler}
 	 * for the `--system` argument; cleared on disconnect.
 	 */
+	@Nullable
 	private volatile String discoveredJdkPath;
 	/**
 	 * Major Java version of the target JVM (e.g., 8, 11, 17, 21); 0 until {@link #discoverClasspath}
@@ -141,8 +147,8 @@ public class JDIConnectionService {
 
 		// Set connection arguments
 		Map<String, Connector.Argument> args = connector.defaultArguments();
-		args.get("hostname").setValue(host);
-		args.get("port").setValue(String.valueOf(port));
+		Objects.requireNonNull(args.get("hostname"), "SocketAttach connector missing 'hostname' argument").setValue(host);
+		Objects.requireNonNull(args.get("port"), "SocketAttach connector missing 'port' argument").setValue(String.valueOf(port));
 
 		// Attach
 		vm = connector.attach(args);
@@ -241,7 +247,8 @@ public class JDIConnectionService {
 		} catch (Exception e) {
 			log.debug("[JDI] Pending promotion failed: {}", e.getMessage());
 		}
-		return vm;
+		// ensureConnected() guarantees vm != null or throws.
+		return Objects.requireNonNull(vm);
 	}
 
 	/**
@@ -249,6 +256,7 @@ public class JDIConnectionService {
 	 * {@link BreakpointTracker#tryPromotePending(JDIConnectionService, ThreadReference)} to avoid
 	 * recursion. Callers must already hold the connection service monitor.
 	 */
+	@Nullable
 	VirtualMachine getRawVM() {
 		return vm;
 	}
@@ -256,7 +264,7 @@ public class JDIConnectionService {
 	/**
 	 * Stores an ObjectReference in the cache for later cross-call inspection. Thread-safe, null-safe.
 	 */
-	public void cacheObject(ObjectReference obj) {
+	public void cacheObject(@Nullable ObjectReference obj) {
 		if (obj != null) {
 			objectCache.put(obj.uniqueID(), obj);
 		}
@@ -635,7 +643,7 @@ public class JDIConnectionService {
 	 * @param value the JDI value to format (may be null)
 	 * @return formatted string representation
 	 */
-	public String formatFieldValue(Value value) {
+	public String formatFieldValue(@Nullable Value value) {
 		if (value == null) {
 			return "null";
 		}
@@ -671,6 +679,7 @@ public class JDIConnectionService {
 	 * directly via JDI (no invocation needed) and returns the unboxed string form. Returns {@code null}
 	 * for any other type so the caller can fall through to the regular {@code Object#N (...)} rendering.
 	 */
+	@Nullable
 	private String tryUnboxPrimitive(ObjectReference obj) {
 		String typeName = obj.referenceType().name();
 		if (!isBoxedPrimitiveType(typeName)) {
@@ -717,7 +726,8 @@ public class JDIConnectionService {
 	 *                        `INVOKE_SINGLE_THREADED` which requires a usable invocation thread
 	 * @return classpath string (separator inferred from the first entry), or `null` on any failure
 	 */
-	public String discoverClasspath(ThreadReference suspendedThread) {
+	@Nullable
+	public String discoverClasspath(@Nullable ThreadReference suspendedThread) {
 		if (cachedClasspath != null) {
 			return cachedClasspath;
 		}
@@ -740,11 +750,11 @@ public class JDIConnectionService {
 			DiscoveryResult result = discoverer.discoverFullClasspath(suspendedThread);
 
 			// Store discovered JDK path for later use by JDT compiler
-			discoveredJdkPath = result.getLocalJdkPath();
-			targetMajorVersion = result.getTargetMajorVersion();
+			discoveredJdkPath = result.localJdkPath();
+			targetMajorVersion = result.targetMajorVersion();
 			log.info("[JDI] Using local JDK: {} (Java {})", discoveredJdkPath, targetMajorVersion);
 
-			Set<String> classpathEntries = result.getApplicationClasspath();
+			Set<String> classpathEntries = result.applicationClasspath();
 
 			if (classpathEntries.isEmpty()) {
 				log.warn("[JDI] No classpath entries discovered");
@@ -780,6 +790,7 @@ public class JDIConnectionService {
 	 *
 	 * @return Local JDK path, or null if not yet discovered
 	 */
+	@Nullable
 	public String getDiscoveredJdkPath() {
 		return discoveredJdkPath;
 	}
@@ -794,6 +805,7 @@ public class JDIConnectionService {
 	/**
 	 * Returns a previously cached ObjectReference, or null if not in cache.
 	 */
+	@Nullable
 	public ObjectReference getCachedObject(long objectId) {
 		return objectCache.get(objectId);
 	}
@@ -818,6 +830,7 @@ public class JDIConnectionService {
 	 * their {@link com.sun.jdi.event.ClassPrepareEvent} is not delivered to JDI clients. Forcing
 	 * the load via {@code Class.forName} bypasses both issues.
 	 */
+	@Nullable
 	public synchronized ReferenceType findOrForceLoadClass(String className) {
 		return findOrForceLoadClass(className, null);
 	}
@@ -828,7 +841,8 @@ public class JDIConnectionService {
 	 * (breakpoint, step, exception, class prepare) — JDI cannot invoke methods on threads
 	 * suspended via vm.suspend() (e.g., the VMStart-suspended state).
 	 */
-	public synchronized ReferenceType findOrForceLoadClass(String className, ThreadReference preferredThread) {
+	@Nullable
+	public synchronized ReferenceType findOrForceLoadClass(String className, @Nullable ThreadReference preferredThread) {
 		if (vm == null) return null;
 
 		// Fast path: already visible via the indexed lookup
@@ -929,6 +943,7 @@ public class JDIConnectionService {
 	 * 2. Any other suspended thread with frames, excluding JVM-internal threads (Reference Handler,
 	 *    Finalizer, etc.) which are suspended in native waits and would fail JDI's invoke check.
 	 */
+	@Nullable
 	private ThreadReference findSuspendedThread() {
 		if (vm == null) return null;
 		try {

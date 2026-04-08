@@ -4,6 +4,8 @@ import one.edee.mcp.jdwp.evaluation.InMemoryJavaCompiler;
 import one.edee.mcp.jdwp.evaluation.JdiExpressionEvaluator;
 import one.edee.mcp.jdwp.evaluation.RemoteCodeExecutor;
 
+import java.io.Serial;
+
 /**
  * Single checked exception propagated out of the expression-evaluation pipeline (the
  * {@link InMemoryJavaCompiler}, {@link RemoteCodeExecutor},
@@ -13,11 +15,14 @@ import one.edee.mcp.jdwp.evaluation.RemoteCodeExecutor;
  */
 public class JdiEvaluationException extends Exception {
 
-	public JdiEvaluationException(String message) {
-		super(message);
-	}
+    @Serial
+    private static final long serialVersionUID = -8640643362312809268L;
 
-	public JdiEvaluationException(String message, Throwable cause) {
-		super(message, cause);
-	}
+    public JdiEvaluationException(String message) {
+        super(message);
+    }
+
+    public JdiEvaluationException(String message, Throwable cause) {
+        super(message, cause);
+    }
 }

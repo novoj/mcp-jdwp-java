@@ -51,6 +51,12 @@ Evaluates arbitrary Java expressions at breakpoints by compiling and injecting b
 
 Watchers are MCP-side only — they store expressions that get evaluated via the expression pipeline when a breakpoint is hit.
 
+### Nullness
+
+`jdwp-mcp-server` is `@NullMarked` at the package level — every type, field, parameter and return in the module is **non-null by default**. The small number of legitimately nullable slots are annotated with `org.jspecify.annotations.Nullable`. The convention is enforced at compile time by NullAway running as an Error Prone plugin in `maven-compiler-plugin` (see `jdwp-mcp-server/pom.xml`); a `mvn -pl jdwp-mcp-server compile` that emits any `[NullAway]` diagnostic fails the build.
+
+When adding new code, do not introduce un-annotated nullable slots — if a value can legitimately be null, annotate the declaration with `@Nullable` from `org.jspecify.annotations`. `jdwp-sandbox` is intentionally unmarked: its classes are deliberately broken debugging targets and annotations there would muddy the exercises.
+
 ## Key Design Decisions
 
 - MCP server type is `SYNC` and `web-application-type=none` — communication is JSON over STDIO, no HTTP server.

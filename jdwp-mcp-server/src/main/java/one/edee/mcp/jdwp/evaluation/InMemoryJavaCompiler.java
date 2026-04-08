@@ -3,6 +3,7 @@ package one.edee.mcp.jdwp.evaluation;
 import one.edee.mcp.jdwp.evaluation.exceptions.JdiEvaluationException;
 import lombok.extern.slf4j.Slf4j;
 import org.eclipse.jdt.internal.compiler.tool.EclipseCompiler;
+import org.jspecify.annotations.Nullable;
 import org.springframework.stereotype.Service;
 
 import javax.tools.*;
@@ -36,8 +37,10 @@ import java.util.stream.Collectors;
 public class InMemoryJavaCompiler {
 
 	/** Filesystem path to the target-matching JDK; used as `--system` so JDT can resolve system classes. */
+	@Nullable
 	private String jdkPath;
 	/** Path-separator-delimited classpath of the target VM, populated lazily by {@link #configure}. */
+	@Nullable
 	private String classpath;
 	/** Target JVM major version (8, 11, 17, ...); defaults to 8 until {@link #configure} is called. */
 	private int targetMajorVersion = 8;

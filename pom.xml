@@ -11,7 +11,7 @@
         <relativePath/>
     </parent>
 
-    <groupId>io.mcp.jdwp</groupId>
+    <groupId>one.edee.mcp.jdwp</groupId>
     <artifactId>mcp-jdwp-parent</artifactId>
     <version>1.0.0</version>
     <packaging>pom</packaging>
@@ -28,6 +28,10 @@
         <java.version>17</java.version>
         <spring-ai-mcp.version>2.0.0-M4</spring-ai-mcp.version>
         <ecj.version>3.45.0</ecj.version>
+        <!-- NullAway 0.13.1 still references com.google.errorprone.predicates.type.DescendantOf,
+             which was removed in Error Prone 2.49.0 — stay on 2.48.0 until NullAway catches up. -->
+        <error-prone.version>2.48.0</error-prone.version>
+        <nullaway.version>0.13.1</nullaway.version>
         <!-- Default empty so surefire's argLine can be extended via -DargLine="..." on the command line -->
         <argLine></argLine>
     </properties>

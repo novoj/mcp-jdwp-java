@@ -12,6 +12,7 @@ import com.sun.jdi.request.EventRequestManager;
 import com.sun.jdi.request.ExceptionRequest;
 import lombok.extern.slf4j.Slf4j;
 import one.edee.mcp.jdwp.evaluation.JdiExpressionEvaluator;
+import org.jspecify.annotations.Nullable;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -67,6 +68,7 @@ public class BreakpointTracker {
 	 * exceptions). Stored in a single volatile field so readers cannot observe a torn pair from
 	 * two different writes (FINDING-9). {@code null} until the first event lands or after a reset.
 	 */
+	@Nullable
 	private volatile LastBreakpoint lastBreakpoint;
 
 	/**
@@ -80,6 +82,7 @@ public class BreakpointTracker {
 	 * `volatile` for cross-thread visibility; mutating methods that touch the field are
 	 * `synchronized` so the arm-then-fire ordering is atomic.
 	 */
+	@Nullable
 	private volatile CountDownLatch nextEventLatch;
 
 	// ── Active breakpoint operations ──
@@ -96,6 +99,7 @@ public class BreakpointTracker {
 	/**
 	 * Lookup a breakpoint by its synthetic ID.
 	 */
+	@Nullable
 	public BreakpointRequest getBreakpoint(int id) {
 		return breakpointsById.get(id);
 	}
@@ -152,6 +156,7 @@ public class BreakpointTracker {
 	 *
 	 * @return the ID, or null if not tracked
 	 */
+	@Nullable
 	public Integer findIdByRequest(BreakpointRequest bp) {
 		for (Map.Entry<Integer, BreakpointRequest> entry : breakpointsById.entrySet()) {
 			if (entry.getValue() == bp) {
@@ -240,6 +245,7 @@ public class BreakpointTracker {
 	/**
 	 * Looks up a pending breakpoint by its synthetic ID.
 	 */
+	@Nullable
 	public PendingBreakpoint getPendingBreakpoint(int id) {
 		return pendingBreakpointsById.get(id);
 	}
@@ -285,7 +291,7 @@ public class BreakpointTracker {
 	/**
 	 * Mark a pending breakpoint as failed (e.g., no executable code at line).
 	 */
-	public void markPendingFailed(int id, String reason) {
+	public void markPendingFailed(int id, @Nullable String reason) {
 		PendingBreakpoint pending = pendingBreakpointsById.get(id);
 		if (pending != null) {
 			pending.setFailureReason(reason);
@@ -311,6 +317,7 @@ public class BreakpointTracker {
 	/**
 	 * Removes and returns the ClassPrepareRequest for the given class, or null if none exists.
 	 */
+	@Nullable
 	public ClassPrepareRequest removeClassPrepareRequest(String className) {
 		return classPrepareRequests.remove(className);
 	}
@@ -343,12 +350,13 @@ public class BreakpointTracker {
 	 * {@link JdiEventListener#evaluateCondition} on every BP hit; if the expression evaluates to
 	 * false the listener auto-resumes without notifying the user.
 	 */
-	public void setCondition(int breakpointId, String condition) {
+	public void setCondition(int breakpointId, @Nullable String condition) {
 		if (condition != null && !condition.isBlank()) {
 			getOrCreateMetadata(breakpointId).condition = condition;
 		}
 	}
 
+	@Nullable
 	public String getCondition(int breakpointId) {
 		BreakpointMetadata meta = breakpointMetadata.get(breakpointId);
 		return meta != null ? meta.condition : null;
@@ -361,12 +369,13 @@ public class BreakpointTracker {
 	 * evaluates the expression via {@link JdiExpressionEvaluator}, records a
 	 * `LOGPOINT` (or `LOGPOINT_ERROR`) entry in {@link EventHistory}, and auto-resumes the thread.
 	 */
-	public void setLogpointExpression(int breakpointId, String expression) {
+	public void setLogpointExpression(int breakpointId, @Nullable String expression) {
 		if (expression != null && !expression.isBlank()) {
 			getOrCreateMetadata(breakpointId).logpointExpression = expression;
 		}
 	}
 
+	@Nullable
 	public String getLogpointExpression(int breakpointId) {
 		BreakpointMetadata meta = breakpointMetadata.get(breakpointId);
 		return meta != null ? meta.logpointExpression : null;
@@ -467,7 +476,7 @@ public class BreakpointTracker {
 	 * exists but cannot be force-loaded). The pending entry stays in the map so the failure reason
 	 * is visible to `jdwp_list_exception_breakpoints`.
 	 */
-	public void markPendingExceptionFailed(int id, String reason) {
+	public void markPendingExceptionFailed(int id, @Nullable String reason) {
 		PendingExceptionBreakpoint pending = pendingExceptionBreakpointsById.get(id);
 		if (pending != null) {
 			pending.setFailureReason(reason);
@@ -489,7 +498,7 @@ public class BreakpointTracker {
 	 *
 	 * @return number of items promoted in this call
 	 */
-	public synchronized int tryPromotePending(JDIConnectionService jdiService, ThreadReference preferredThread) {
+	public synchronized int tryPromotePending(@Nullable JDIConnectionService jdiService, @Nullable ThreadReference preferredThread) {
 		if (jdiService == null) return 0;
 
 		VirtualMachine vm;
@@ -573,11 +582,13 @@ public class BreakpointTracker {
 		this.lastBreakpoint = new LastBreakpoint(thread, breakpointId);
 	}
 
+	@Nullable
 	public ThreadReference getLastBreakpointThread() {
 		LastBreakpoint snapshot = lastBreakpoint;
 		return snapshot != null ? snapshot.thread() : null;
 	}
 
+	@Nullable
 	public Integer getLastBreakpointId() {
 		LastBreakpoint snapshot = lastBreakpoint;
 		return snapshot != null ? snapshot.id() : null;
@@ -592,6 +603,7 @@ public class BreakpointTracker {
 	 * @return the most recent {@link LastBreakpoint} snapshot, or {@code null} if no event has
 	 *         fired since the last reset
 	 */
+	@Nullable
 	public LastBreakpoint getLastBreakpoint() {
 		return lastBreakpoint;
 	}
@@ -662,6 +674,7 @@ public class BreakpointTracker {
 		private final int lineNumber;
 		private final int suspendPolicy;
 		private final String suspendPolicyLabel;
+		@Nullable
 		private volatile String failureReason;
 
 		public PendingBreakpoint(String className, int lineNumber, int suspendPolicy, String suspendPolicyLabel) {
@@ -675,9 +688,10 @@ public class BreakpointTracker {
 		public int getLineNumber() { return lineNumber; }
 		public int getSuspendPolicy() { return suspendPolicy; }
 		public String getSuspendPolicyLabel() { return suspendPolicyLabel; }
+		@Nullable
 		public String getFailureReason() { return failureReason; }
 		/** Records why this pending breakpoint could not be activated (e.g., no executable code at line). */
-		public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
+		public void setFailureReason(@Nullable String failureReason) { this.failureReason = failureReason; }
 	}
 
 	/**
@@ -685,8 +699,10 @@ public class BreakpointTracker {
 	 */
 	public static class BreakpointMetadata {
 		/** Boolean expression evaluated against frame 0 by {@link JdiEventListener#evaluateCondition}; `null` until set. */
+		@Nullable
 		volatile String condition;
 		/** Logpoint expression — when non-null, the breakpoint auto-resumes and records the result to {@link EventHistory}. */
+		@Nullable
 		volatile String logpointExpression;
 	}
 
@@ -720,6 +736,7 @@ public class BreakpointTracker {
 		private final String exceptionClass;
 		private final boolean caught;
 		private final boolean uncaught;
+		@Nullable
 		private volatile String failureReason;
 
 		public PendingExceptionBreakpoint(String exceptionClass, boolean caught, boolean uncaught) {
@@ -731,8 +748,9 @@ public class BreakpointTracker {
 		public String getExceptionClass() { return exceptionClass; }
 		public boolean isCaught() { return caught; }
 		public boolean isUncaught() { return uncaught; }
+		@Nullable
 		public String getFailureReason() { return failureReason; }
 		/** Records why this pending exception breakpoint could not be activated (mirrors {@link PendingBreakpoint#setFailureReason}). */
-		public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
+		public void setFailureReason(@Nullable String failureReason) { this.failureReason = failureReason; }
 	}
 }

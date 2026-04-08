@@ -2,6 +2,7 @@ package one.edee.mcp.jdwp.evaluation;
 
 import com.sun.jdi.*;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 
 import java.io.File;
 import java.nio.file.Files;
@@ -156,6 +157,7 @@ public class JdkDiscoveryService {
 	 * Three-strategy fallback search documented on the class. Returns the first valid JDK home
 	 * found, or `null` if every strategy fails (the caller throws {@link JdkNotFoundException}).
 	 */
+	@Nullable
 	private String findLocalJdk(int majorVersion, String targetHome) {
 		// Strategy 1: Check if target JVM's java.home is accessible locally
 		if (isValidJdkHome(targetHome)) {
@@ -212,6 +214,7 @@ public class JdkDiscoveryService {
 	 * contains `jdk` or `java` and matches a `-<major>` / `_<major>` version-suffix pattern.
 	 * Returns the first valid JDK home found via {@link #isValidJdkHome}.
 	 */
+	@Nullable
 	private String searchDirectoriesForJdk(int majorVersion) {
 		List<Path> searchDirs = new ArrayList<>();
 

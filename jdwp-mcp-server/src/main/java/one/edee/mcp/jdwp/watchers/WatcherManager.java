@@ -1,6 +1,7 @@
 package one.edee.mcp.jdwp.watchers;
 
 import one.edee.mcp.jdwp.evaluation.JdiExpressionEvaluator;
+import org.jspecify.annotations.Nullable;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -65,6 +66,7 @@ public class WatcherManager {
 	 * @param watcherId UUID of the watcher
 	 * @return The watcher, or null if not found
 	 */
+	@Nullable
 	public Watcher getWatcher(String watcherId) {
 		return watchersById.get(watcherId);
 	}

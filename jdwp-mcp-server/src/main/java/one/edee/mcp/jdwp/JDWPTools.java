@@ -12,6 +12,7 @@ import one.edee.mcp.jdwp.evaluation.JdiExpressionEvaluator;
 import one.edee.mcp.jdwp.watchers.Watcher;
 import one.edee.mcp.jdwp.watchers.WatcherManager;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Service;
@@ -497,7 +498,8 @@ public class JDWPTools {
 	 * @param message the raw compiler error string
 	 * @return the field/identifier name if any of the three patterns match, otherwise {@code null}
 	 */
-	static String parseUnresolvedFieldName(String message) {
+	@Nullable
+	static String parseUnresolvedFieldName(@Nullable String message) {
 		if (message == null) {
 			return null;
 		}
@@ -950,7 +952,7 @@ public class JDWPTools {
 	 * {@link #jdwp_set_breakpoint} and {@link #jdwp_set_logpoint} to avoid orphaning
 	 * pending entries on {@code AbsentInformationException} from {@code locationsOfLine}.
 	 */
-	private void cleanupOrphanPendingBreakpoint(Integer pendingId) {
+	private void cleanupOrphanPendingBreakpoint(@Nullable Integer pendingId) {
 		if (pendingId != null) {
 			breakpointTracker.removePendingBreakpoint(pendingId);
 		}
@@ -1554,7 +1556,7 @@ public class JDWPTools {
 			Map<String, Object> stats = watcherManager.getStats();
 			StringBuilder result = new StringBuilder();
 			result.append(String.format("Active watchers: %d across %d breakpoints\n\n",
-				stats.get("totalWatchers"), stats.get("breakpointsWithWatchers")));
+				(Integer) stats.get("totalWatchers"), (Integer) stats.get("breakpointsWithWatchers")));
 
 			// Group by breakpoint
 			Map<Integer, List<Watcher>> grouped = watchers.stream()
@@ -1749,6 +1751,7 @@ public class JDWPTools {
 	}
 
 	/** Parses a string value into a JDI Value matching the target type. Supports primitives, String, and null. */
+	@Nullable
 	private Value createJdiValue(VirtualMachine vm, String valueStr, Type targetType) throws Exception {
 		if ("null".equals(valueStr)) return null;
 
@@ -1789,6 +1792,7 @@ public class JDWPTools {
 	}
 
 	/** Finds a thread by its unique ID. */
+	@Nullable
 	private ThreadReference findThread(VirtualMachine vm, long threadId) {
 		return vm.allThreads().stream()
 			.filter(t -> t.uniqueID() == threadId)
