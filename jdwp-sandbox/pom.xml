@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>io.mcp.jdwp</groupId>
+        <groupId>one.edee.mcp.jdwp</groupId>
         <artifactId>mcp-jdwp-parent</artifactId>
         <version>1.0.0</version>
         <relativePath>../pom.xml</relativePath>
