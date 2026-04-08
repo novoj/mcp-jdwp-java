@@ -718,7 +718,7 @@ mvn -pl jdwp-sandbox test -Dtest=RecursiveCalculatorTest -DskipTests=false -Dmav
 
 # From Claude Code (MCP):
 # 1. jdwp_wait_for_attach()
-# 2. jdwp_set_breakpoint("io.mcp.jdwp.sandbox.recursion.RecursiveCalculator", 22)
+# 2. jdwp_set_breakpoint("recursion.one.edee.jdwp.sandbox.RecursiveCalculator", 22)
 #    — line 22 is "int left = compute(n - 1);"
 # 3. jdwp_resume_until_event()
 #    — BP fires once inside compute(5)

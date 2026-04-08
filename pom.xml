@@ -20,7 +20,7 @@
     <description>Parent POM for the MCP JDWP Inspector reactor: mcp-server + jdwp-sandbox.</description>
 
     <modules>
-        <module>mcp-server</module>
+        <module>jdwp-mcp-server</module>
         <module>jdwp-sandbox</module>
     </modules>
 
