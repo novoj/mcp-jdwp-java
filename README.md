@@ -27,31 +27,37 @@ Raw JDWP/JDI gives you threads, stack frames, and variables. That's enough for a
 - **JDK 17+** (must be a JDK, not a JRE — JDI lives in `jdk.jdi`)
 - **Maven 3.8+** (wrapper included)
 
-### 1. Build
+### 1. Install the plugin
+
+**Option A: Plugin marketplace (recommended)**
+
+Installs the MCP server, the `java-debug` skill (debugging workflows, recipes, gotchas), and the `.mcp.json` configuration in one step:
 
 ```bash
-cd mcp-jdwp-java
+/plugin marketplace add https://github.com/FgForrest/mcp-jdwp-java.git
+/plugin install jdwp-debugging@mcp-jdwp-java
+```
+
+### 2. Build the server JAR
+
+The plugin needs a compiled JAR. From the installed plugin directory (or a local clone):
+
+```bash
 mvn clean package -DskipTests
 ```
 
 Produces: `jdwp-mcp-server/target/mcp-jdwp-java.jar`
 
-### 2. Register with Claude Code
+### 3. Restart Claude Code
 
-**Option A: Plugin (recommended — includes debugging skill)**
+To pick up the plugin and MCP server.
 
-Install as a Claude Code plugin to get both the MCP server and the `java-debug` skill (debugging recipes, workflows, and gotchas that teach Claude how to use the tools effectively):
+<details>
+<summary><strong>Alternative: manual MCP registration (without plugin)</strong></summary>
 
-```bash
-claude plugin add /path/to/mcp-jdwp-java
-```
+If you prefer to register the MCP server directly without the plugin (no skill included):
 
-The plugin bundles:
-- `.mcp.json` — MCP server configuration
-- `skills/java-debug/SKILL.md` — debugging workflows and recipes
-- `.claude-plugin/plugin.json` — plugin metadata
-
-**Option B: CLI**
+**CLI:**
 
 ```bash
 claude mcp add jdwp-inspector -s user \
@@ -60,14 +66,7 @@ claude mcp add jdwp-inspector -s user \
   -- java --add-modules jdk.jdi -jar /path/to/mcp-jdwp-java.jar
 ```
 
-To change the JDWP port (default 5005):
-
-```bash
-claude mcp add jdwp-inspector -s user \
-  -e MCP_TIMEOUT=30000 \
-  -e MCP_TOOL_TIMEOUT=120000 \
-  -- java --add-modules jdk.jdi -DJVM_JDWP_PORT=12345 -jar /path/to/mcp-jdwp-java.jar
-```
+To change the JDWP port (default 5005), add `-DJVM_JDWP_PORT=12345` before `-jar`.
 
 The `MCP_TIMEOUT` and `MCP_TOOL_TIMEOUT` environment variables are important — JVM startup is not instant (class loading, Spring context initialization), so the default MCP timeouts will cause Claude Code to give up before the server is ready. `MCP_TIMEOUT=30000` gives the server 30 seconds to start, and `MCP_TOOL_TIMEOUT=120000` allows up to 2 minutes for long-running tools like first-time expression evaluation (which discovers the target's classpath and compiles bytecode).
 
@@ -75,7 +74,7 @@ Re-installing requires removing first: `claude mcp remove jdwp-inspector -s user
 
 Drop `-s user` to scope to the current project only.
 
-**Option C: `.mcp.json`**
+**`.mcp.json`:**
 
 ```json
 {
@@ -95,7 +94,9 @@ Drop `-s user` to scope to the current project only.
 }
 ```
 
-### 3. Launch your Java application with JDWP
+</details>
+
+### 4. Launch your Java application with JDWP
 
 **Maven Surefire (test debugging):**
 
@@ -110,10 +111,6 @@ Starts the JVM with JDWP on port 5005, suspended until a debugger connects.
 ```
 -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005
 ```
-
-### 4. Restart Claude Code
-
-To pick up the new MCP configuration.
 
 ## Features beyond standard JDWP
 
@@ -441,7 +438,8 @@ mcp-jdwp-java/
 ├── WORKFLOW.md                          # Development guide
 ├── .mcp.json                            # MCP server configuration
 ├── .claude-plugin/
-│   └── plugin.json                      # Claude Code plugin metadata
+│   ├── plugin.json                      # Claude Code plugin metadata
+│   └── marketplace.json                 # Plugin marketplace registry
 ├── skills/
 │   └── java-debug/
 │       ├── SKILL.md                     # Debugging skill (workflows, recipes, gotchas)
