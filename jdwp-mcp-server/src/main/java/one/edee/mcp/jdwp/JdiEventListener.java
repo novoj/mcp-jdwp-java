@@ -8,7 +8,6 @@ import com.sun.jdi.request.EventRequest;
 import com.sun.jdi.request.EventRequestManager;
 import com.sun.jdi.request.ExceptionRequest;
 import one.edee.mcp.jdwp.evaluation.JdiExpressionEvaluator;
-import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
@@ -40,9 +39,10 @@ import java.util.Map;
  * which is safe because the BP thread is already suspended at a method-invocation event —
  * JDI permits {@code invokeMethod} on threads in that state.
  */
-@Slf4j
 @Service
 public class JdiEventListener {
+
+	private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(JdiEventListener.class);
 
 	private final BreakpointTracker breakpointTracker;
 	private final EventHistory eventHistory;

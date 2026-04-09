@@ -1,7 +1,6 @@
 package one.edee.mcp.jdwp.evaluation;
 
 import one.edee.mcp.jdwp.evaluation.exceptions.JdiEvaluationException;
-import lombok.extern.slf4j.Slf4j;
 import org.eclipse.jdt.internal.compiler.tool.EclipseCompiler;
 import org.jspecify.annotations.Nullable;
 import org.springframework.stereotype.Service;
@@ -32,9 +31,10 @@ import java.util.stream.Collectors;
  * Source/target version is derived from the major version: `1.8` for Java 8, the bare number for Java 9+.
  * The `-g` flag is always passed so the evaluator can resolve local variable names from the captured bytecode.
  */
-@Slf4j
 @Service
 public class InMemoryJavaCompiler {
+
+	private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(InMemoryJavaCompiler.class);
 
 	/** Filesystem path to the target-matching JDK; used as `--system` so JDT can resolve system classes. */
 	@Nullable

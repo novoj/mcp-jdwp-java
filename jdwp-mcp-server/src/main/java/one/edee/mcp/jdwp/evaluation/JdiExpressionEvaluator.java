@@ -4,7 +4,6 @@ import one.edee.mcp.jdwp.EvaluationGuard;
 import one.edee.mcp.jdwp.evaluation.exceptions.JdiEvaluationException;
 import one.edee.mcp.jdwp.JDIConnectionService;
 import com.sun.jdi.*;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -38,9 +37,10 @@ import java.util.stream.Collectors;
  * BEFORE {@link #evaluate}, never from inside the JDI event listener. The configuration step
  * issues `invokeMethod` calls that would deadlock the listener if it called itself.
  */
-@Slf4j
 @Service
 public class JdiExpressionEvaluator {
+
+	private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(JdiExpressionEvaluator.class);
 
 	/** Package name baked into every generated wrapper class — kept short and isolated from app code. */
 	private static final String EVALUATION_PACKAGE = "mcp.jdi.evaluation";

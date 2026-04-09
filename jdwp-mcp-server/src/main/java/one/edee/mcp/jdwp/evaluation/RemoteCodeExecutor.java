@@ -2,7 +2,6 @@ package one.edee.mcp.jdwp.evaluation;
 
 import one.edee.mcp.jdwp.evaluation.exceptions.JdiEvaluationException;
 import com.sun.jdi.*;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -22,9 +21,10 @@ import java.util.List;
  *    `methodsByName()` may return empty for a defined-but-not-prepared class.
  * 3. Looks up the static method by name and invokes it with `INVOKE_SINGLE_THREADED`.
  */
-@Slf4j
 @Service
 public class RemoteCodeExecutor {
+
+	private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(RemoteCodeExecutor.class);
 
 	/** JDI method name for `ClassLoader.defineClass`. */
 	private static final String CLASSLOADER_DEFINE_CLASS_METHOD = "defineClass";

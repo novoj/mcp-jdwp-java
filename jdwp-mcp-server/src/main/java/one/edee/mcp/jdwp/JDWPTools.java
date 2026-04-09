@@ -11,7 +11,6 @@ import com.sun.jdi.request.StepRequest;
 import one.edee.mcp.jdwp.evaluation.JdiExpressionEvaluator;
 import one.edee.mcp.jdwp.watchers.Watcher;
 import one.edee.mcp.jdwp.watchers.WatcherManager;
-import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
@@ -43,9 +42,10 @@ import java.util.stream.Collectors;
  * message starting with `Error:`, `[ERROR]`, `[TIMEOUT]`, or `[INTERRUPTED]`, and return it as a
  * `String`. The MCP client is expected to surface these messages verbatim.
  */
-@Slf4j
 @Service
 public class JDWPTools {
+
+	private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(JDWPTools.class);
 
 	private final JDIConnectionService jdiService;
 	private final BreakpointTracker breakpointTracker;

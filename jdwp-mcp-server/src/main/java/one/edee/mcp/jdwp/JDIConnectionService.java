@@ -2,7 +2,6 @@ package one.edee.mcp.jdwp;
 
 import com.sun.jdi.*;
 import com.sun.jdi.connect.*;
-import lombok.extern.slf4j.Slf4j;
 import one.edee.mcp.jdwp.evaluation.InMemoryJavaCompiler;
 import one.edee.mcp.jdwp.evaluation.JdkDiscoveryService;
 import org.jspecify.annotations.Nullable;
@@ -36,9 +35,10 @@ import static one.edee.mcp.jdwp.ThreadFormatting.isJvmInternalThread;
  * Thread-safety: all public mutators are `synchronized` on the service instance; the object cache
  * is a {@link ConcurrentHashMap}; the classpath/JDK fields are `volatile` for cross-thread reads.
  */
-@Slf4j
 @Service
 public class JDIConnectionService {
+
+	private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(JDIConnectionService.class);
 
 	private final JdiEventListener eventListener;
 	private final BreakpointTracker breakpointTracker;

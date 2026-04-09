@@ -10,7 +10,6 @@ import com.sun.jdi.request.ClassPrepareRequest;
 import com.sun.jdi.request.EventRequest;
 import com.sun.jdi.request.EventRequestManager;
 import com.sun.jdi.request.ExceptionRequest;
-import lombok.extern.slf4j.Slf4j;
 import one.edee.mcp.jdwp.evaluation.JdiExpressionEvaluator;
 import org.jspecify.annotations.Nullable;
 import org.springframework.stereotype.Service;
@@ -43,9 +42,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * `ConcurrentHashMap` so listeners can iterate without contending with mutators. The `lastBreakpoint*`
  * fields are `volatile` for cross-thread visibility from the JDI listener thread to MCP worker threads.
  */
-@Slf4j
 @Service
 public class BreakpointTracker {
+
+	private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(BreakpointTracker.class);
 
 	/** Monotonic synthetic ID source shared by every register-* call; reset by {@link #clearAll} / {@link #reset}. */
 	private final AtomicInteger idCounter = new AtomicInteger(1);

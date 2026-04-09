@@ -1,7 +1,6 @@
 package one.edee.mcp.jdwp;
 
 import com.sun.jdi.ThreadReference;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.concurrent.ConcurrentHashMap;
@@ -40,7 +39,6 @@ import java.util.concurrent.ConcurrentMap;
  * {@code merge}/{@code compute} so enter and exit from different threads on the same key are
  * atomic. No locks are held across {@code invokeMethod} calls.
  */
-@Slf4j
 @Service
 public class EvaluationGuard {
 

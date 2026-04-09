@@ -1,7 +1,6 @@
 package one.edee.mcp.jdwp.evaluation;
 
 import com.sun.jdi.*;
-import lombok.extern.slf4j.Slf4j;
 import one.edee.mcp.jdwp.JDIConnectionService;
 import org.jspecify.annotations.Nullable;
 
@@ -27,8 +26,9 @@ import java.util.*;
  * the target version is found via {@link JdkDiscoveryService} — JDT requires `--system <jdkPath>`
  * to compile against the target's system classes.
  */
-@Slf4j
 public class ClasspathDiscoverer {
+
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ClasspathDiscoverer.class);
 
     private final VirtualMachine vm;
 

@@ -1,7 +1,6 @@
 package one.edee.mcp.jdwp.evaluation;
 
 import com.sun.jdi.*;
-import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 
 import java.io.File;
@@ -28,8 +27,9 @@ import java.util.stream.Stream;
  * 3. Directory scan of those parent paths for any subdirectory matching a `<name>-<version>`
  *    pattern containing the major version.
  */
-@Slf4j
 public class JdkDiscoveryService {
+
+	private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(JdkDiscoveryService.class);
 
 	private final VirtualMachine vm;
 	/** Target JVM major version, populated as a side effect of {@link #discoverMatchingJdk}; 0 until then. */

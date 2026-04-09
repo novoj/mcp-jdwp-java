@@ -459,7 +459,6 @@ mcp-jdwp-java/
 - **JDI** (`jdk.jdi` module) — Java Debug Interface
 - **Eclipse JDT Compiler (ECJ)** — In-memory expression compilation
 - **JSpecify + NullAway** — Compile-time nullness enforcement
-- **Lombok** — `@Slf4j` logging
 
 ## Troubleshooting
 
