@@ -156,7 +156,7 @@ public class ClasspathDiscoverer {
      * only.
      */
     @Nullable
-    private ClassLoaderReference getContextClassLoader(ThreadReference suspendedThread) {
+    private static ClassLoaderReference getContextClassLoader(ThreadReference suspendedThread) {
         try {
             final Method getContextClassLoaderMethod = suspendedThread.referenceType()
                 .methodsByName("getContextClassLoader", "()Ljava/lang/ClassLoader;").get(0);
@@ -198,7 +198,7 @@ public class ClasspathDiscoverer {
      * Walks the target VM's type hierarchy to determine whether `type` is assignable to `target`.
      * Operates on JDI mirrors only — does not consult the MCP server's own class hierarchy.
      */
-    private boolean isAssignableTo(ReferenceType type, ClassType target) {
+    private static boolean isAssignableTo(ReferenceType type, ClassType target) {
         try {
             if (type instanceof ClassType classType) {
                 return classType.equals(target) || classType.allInterfaces().contains(target) || isSuperclassOf(classType, target);
@@ -212,7 +212,7 @@ public class ClasspathDiscoverer {
     /**
      * Walks the target VM's superclass chain looking for `target`.
      */
-    private boolean isSuperclassOf(ClassType classType, ClassType target) {
+    private static boolean isSuperclassOf(ClassType classType, ClassType target) {
         try {
             ClassType current = classType;
             while (current != null) {
@@ -231,8 +231,11 @@ public class ClasspathDiscoverer {
      * Reflectively invokes {@code getURLs()} on a URLClassLoader (or compatible subclass) in the target JVM
      * via JDI method invocation, then extracts file paths from the returned URL array.
      */
-    private void extractUrlsFromClassLoader(ClassLoaderReference classLoaderRef, ThreadReference suspendedThread,
-                                            Set<String> classpathEntries) {
+    private void extractUrlsFromClassLoader(
+        ClassLoaderReference classLoaderRef,
+        ThreadReference suspendedThread,
+        Set<String> classpathEntries
+    ) {
         try {
             final ReferenceType clType = classLoaderRef.referenceType();
             final List<Method> getUrlsMethods = clType.methodsByName("getURLs", "()[Ljava/net/URL;");
@@ -276,7 +279,7 @@ public class ClasspathDiscoverer {
      * Invokes `URL.getPath()` in the target VM and returns the URL-decoded result.
      */
     @Nullable
-    private String extractPathFromUrl(ObjectReference urlRef, ThreadReference suspendedThread) {
+    private static String extractPathFromUrl(ObjectReference urlRef, ThreadReference suspendedThread) {
         try {
             final ClassType urlClass = (ClassType) urlRef.referenceType();
             final Method getPathMethod = urlClass.methodsByName("getPath", "()Ljava/lang/String;").get(0);
@@ -302,7 +305,7 @@ public class ClasspathDiscoverer {
     /**
      * Best-effort URL decode (e.g., `%20` → space); returns the original path on failure.
      */
-    private String decodeUrlPath(String path) {
+    private static String decodeUrlPath(String path) {
         try {
             // Simple URL decoding (replace %20 with space, etc.)
             return URLDecoder.decode(path, StandardCharsets.UTF_8);
@@ -316,7 +319,7 @@ public class ClasspathDiscoverer {
      * Invokes `ClassLoader.getParent()` to walk up the classloader hierarchy; `null` ends the chain.
      */
     @Nullable
-    private ClassLoaderReference getParentClassLoader(
+    private static ClassLoaderReference getParentClassLoader(
         ClassLoaderReference classLoaderRef, ThreadReference suspendedThread) {
         try {
             final ReferenceType clType = classLoaderRef.referenceType();

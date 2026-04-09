@@ -36,7 +36,7 @@
              The reactor still releases Java 17 bytecode — see maven-compiler-plugin <release>. -->
         <build.jdk.version>[21,)</build.jdk.version>
         <!-- Default empty so surefire's argLine can be extended via -DargLine="..." on the command line -->
-        <argLine></argLine>
+        <argLine/>
     </properties>
 
     <build>
