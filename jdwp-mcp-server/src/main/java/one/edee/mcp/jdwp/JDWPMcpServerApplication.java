@@ -5,13 +5,13 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 /**
  * MCP Server for JDWP inspection using JDI
- *
+ * <p>
  * Tools are automatically detected via @McpTool annotations in JDWPTools
  */
 @SpringBootApplication
 public class JDWPMcpServerApplication {
 
-	public static void main(String[] args) {
-		SpringApplication.run(JDWPMcpServerApplication.class, args);
-	}
+    public static void main(String[] args) {
+        SpringApplication.run(JDWPMcpServerApplication.class, args);
+    }
 }

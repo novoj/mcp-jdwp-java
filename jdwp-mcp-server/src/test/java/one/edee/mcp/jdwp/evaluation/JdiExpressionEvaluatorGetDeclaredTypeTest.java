@@ -28,9 +28,8 @@ class JdiExpressionEvaluatorGetDeclaredTypeTest {
 	@BeforeEach
 	void setUp() {
 		InMemoryJavaCompiler compiler = mock(InMemoryJavaCompiler.class);
-		RemoteCodeExecutor executor = mock(RemoteCodeExecutor.class);
 		JDIConnectionService jdiService = mock(JDIConnectionService.class);
-		evaluator = new JdiExpressionEvaluator(compiler, executor, jdiService, new EvaluationGuard());
+		evaluator = new JdiExpressionEvaluator(compiler, jdiService, new EvaluationGuard());
 	}
 
 	@Nested

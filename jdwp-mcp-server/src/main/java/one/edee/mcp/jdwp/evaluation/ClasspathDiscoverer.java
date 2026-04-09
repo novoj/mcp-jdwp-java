@@ -3,6 +3,8 @@ package one.edee.mcp.jdwp.evaluation;
 import com.sun.jdi.*;
 import one.edee.mcp.jdwp.JDIConnectionService;
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -28,7 +30,7 @@ import java.util.*;
  */
 public class ClasspathDiscoverer {
 
-    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ClasspathDiscoverer.class);
+    private static final Logger log = LoggerFactory.getLogger(ClasspathDiscoverer.class);
 
     private final VirtualMachine vm;
 
@@ -102,11 +104,9 @@ public class ClasspathDiscoverer {
 
             return new DiscoveryResult(localJdkPath, classpathEntries, jdkDiscovery.getTargetMajorVersion());
 
+        } catch (JdkDiscoveryService.JdkNotFoundException e) {
+            throw e;
         } catch (Exception e) {
-            if (e instanceof JdkDiscoveryService.JdkNotFoundException jnf) {
-                // Propagate JDK not found exception - this is a critical error
-                throw jnf;
-            }
             final long elapsed = System.currentTimeMillis() - startTime;
             log.error("[Discoverer] Error discovering full classpath after {}ms", elapsed, e);
             throw new RuntimeException("Classpath discovery failed: " + e.getMessage(), e);
@@ -231,7 +231,7 @@ public class ClasspathDiscoverer {
      * Reflectively invokes {@code getURLs()} on a URLClassLoader (or compatible subclass) in the target JVM
      * via JDI method invocation, then extracts file paths from the returned URL array.
      */
-    private void extractUrlsFromClassLoader(
+    private static void extractUrlsFromClassLoader(
         ClassLoaderReference classLoaderRef,
         ThreadReference suspendedThread,
         Set<String> classpathEntries

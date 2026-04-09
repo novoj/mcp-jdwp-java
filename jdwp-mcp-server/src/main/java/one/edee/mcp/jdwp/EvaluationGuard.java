@@ -42,56 +42,56 @@ import java.util.concurrent.ConcurrentMap;
 @Service
 public class EvaluationGuard {
 
-	/**
-	 * Depth counter per target-VM thread. An entry is present iff the thread is currently inside
-	 * at least one MCP-driven {@code invokeMethod} chain; the value is the current nesting depth.
-	 * Absent entries mean "not evaluating" — we remove entries on the last {@code exit} to keep
-	 * the map compact and {@link #isEvaluating} branch-free.
-	 */
-	private final ConcurrentMap<Long, Integer> depthByThreadId = new ConcurrentHashMap<>();
+    /**
+     * Depth counter per target-VM thread. An entry is present iff the thread is currently inside
+     * at least one MCP-driven {@code invokeMethod} chain; the value is the current nesting depth.
+     * Absent entries mean "not evaluating" — we remove entries on the last {@code exit} to keep
+     * the map compact and {@link #isEvaluating} branch-free.
+     */
+    private final ConcurrentMap<Long, Integer> depthByThreadId = new ConcurrentHashMap<>();
 
-	/**
-	 * Marks the thread with the given {@code threadUniqueId} as entering an MCP-driven
-	 * evaluation. Safe to call repeatedly for nested invocations — the depth counter increases
-	 * each time and the matching {@link #exit(long)} calls must balance the entries for the
-	 * guard to clear.
-	 *
-	 * <p>Callers MUST capture {@link ThreadReference#uniqueID()} at the call site (before
-	 * starting any {@code invokeMethod} work) and pass the resulting {@code long} to both
-	 * {@code enter} and the paired {@link #exit(long)}. See the class JavaDoc for the rationale.
-	 */
-	public void enter(long threadUniqueId) {
-		depthByThreadId.merge(threadUniqueId, 1, Integer::sum);
-	}
+    /**
+     * Marks the thread with the given {@code threadUniqueId} as entering an MCP-driven
+     * evaluation. Safe to call repeatedly for nested invocations — the depth counter increases
+     * each time and the matching {@link #exit(long)} calls must balance the entries for the
+     * guard to clear.
+     *
+     * <p>Callers MUST capture {@link ThreadReference#uniqueID()} at the call site (before
+     * starting any {@code invokeMethod} work) and pass the resulting {@code long} to both
+     * {@code enter} and the paired {@link #exit(long)}. See the class JavaDoc for the rationale.
+     */
+    public void enter(long threadUniqueId) {
+        depthByThreadId.merge(threadUniqueId, 1, Integer::sum);
+    }
 
-	/**
-	 * Marks the thread with the given {@code threadUniqueId} as leaving one level of an
-	 * MCP-driven evaluation. When the depth reaches zero the entry is removed. An {@code exit}
-	 * with no matching {@code enter} is a no-op so that defensive try/finally cleanup can never
-	 * throw — this matters because the id may outlive the underlying thread if the target
-	 * thread died during the invocation chain.
-	 */
-	public void exit(long threadUniqueId) {
-		depthByThreadId.compute(threadUniqueId, (k, v) -> (v == null || v <= 1) ? null : v - 1);
-	}
+    /**
+     * Marks the thread with the given {@code threadUniqueId} as leaving one level of an
+     * MCP-driven evaluation. When the depth reaches zero the entry is removed. An {@code exit}
+     * with no matching {@code enter} is a no-op so that defensive try/finally cleanup can never
+     * throw — this matters because the id may outlive the underlying thread if the target
+     * thread died during the invocation chain.
+     */
+    public void exit(long threadUniqueId) {
+        depthByThreadId.compute(threadUniqueId, (k, v) -> (v == null || v <= 1) ? null : v - 1);
+    }
 
-	/**
-	 * Returns true iff {@code thread} is currently inside at least one MCP-driven evaluation.
-	 * Queried by {@link JdiEventListener} on every suspending JDI event; must be O(1). JDI
-	 * guarantees the {@code ThreadReference} on a live event is itself live, so calling
-	 * {@code uniqueID()} here cannot throw {@code ObjectCollectedException}.
-	 */
-	public boolean isEvaluating(ThreadReference thread) {
-		return depthByThreadId.containsKey(thread.uniqueID());
-	}
+    /**
+     * Returns true iff {@code thread} is currently inside at least one MCP-driven evaluation.
+     * Queried by {@link JdiEventListener} on every suspending JDI event; must be O(1). JDI
+     * guarantees the {@code ThreadReference} on a live event is itself live, so calling
+     * {@code uniqueID()} here cannot throw {@code ObjectCollectedException}.
+     */
+    public boolean isEvaluating(ThreadReference thread) {
+        return depthByThreadId.containsKey(thread.uniqueID());
+    }
 
-	/**
-	 * Current nesting depth for the thread with the given id; zero if not evaluating. Exposed
-	 * for unit tests and defensive diagnostics — callers should prefer {@link #isEvaluating} for
-	 * the hot-path check.
-	 */
-	int depth(long threadUniqueId) {
-		Integer d = depthByThreadId.get(threadUniqueId);
-		return d == null ? 0 : d;
-	}
+    /**
+     * Current nesting depth for the thread with the given id; zero if not evaluating. Exposed
+     * for unit tests and defensive diagnostics — callers should prefer {@link #isEvaluating} for
+     * the hot-path check.
+     */
+    int depth(long threadUniqueId) {
+        final Integer d = depthByThreadId.get(threadUniqueId);
+        return d == null ? 0 : d;
+    }
 }
