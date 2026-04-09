@@ -56,6 +56,8 @@ claude mcp add jdwp-inspector -s user \
   -- java --add-modules jdk.jdi -DJVM_JDWP_PORT=12345 -jar /path/to/mcp-jdwp-java-1.0.0.jar
 ```
 
+The `MCP_TIMEOUT` and `MCP_TOOL_TIMEOUT` environment variables are important — JVM startup is not instant (class loading, Spring context initialization), so the default MCP timeouts will cause Claude Code to give up before the server is ready. `MCP_TIMEOUT=30000` gives the server 30 seconds to start, and `MCP_TOOL_TIMEOUT=120000` allows up to 2 minutes for long-running tools like first-time expression evaluation (which discovers the target's classpath and compiles bytecode).
+
 Re-installing requires removing first: `claude mcp remove jdwp-inspector -s user`
 
 Drop `-s user` to scope to the current project only.
@@ -467,6 +469,7 @@ mcp-jdwp-java/
 | `tools.jar not found` / `jdk.jdi not available` | Ensure `JAVA_HOME` points to a JDK, not a JRE. Launch with `--add-modules jdk.jdi`. |
 | Connection refused | Verify target JVM has `-agentlib:jdwp=...address=*:5005`. Check port matches `-DJVM_JDWP_PORT`. |
 | MCP server doesn't respond | Rebuild: `mvn clean package -DskipTests`. Check jar path. Restart Claude Code. |
+| MCP server times out on startup | JVM startup takes several seconds. Ensure `MCP_TIMEOUT=30000` (or higher) is set in the MCP registration — the default is too short for a Spring Boot Java process. |
 | "Thread is not suspended" | The thread must be stopped at a breakpoint for stack/locals/expression tools. |
 | Expression evaluation timeout | First evaluation is slow (classpath discovery). Increase `MCP_TOOL_TIMEOUT`. Subsequent evaluations use cache. |
 
