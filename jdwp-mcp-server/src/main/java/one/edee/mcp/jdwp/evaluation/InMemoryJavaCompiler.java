@@ -137,9 +137,8 @@ public class InMemoryJavaCompiler {
 		} finally {
 			// 4. Clean up the temporary directory
 			if (tempDir != null) {
-				try {
-					Files.walk(tempDir)
-						.sorted(Comparator.reverseOrder())
+				try (var paths = Files.walk(tempDir)) {
+					paths.sorted(Comparator.reverseOrder())
 						.map(Path::toFile)
 						.forEach(File::delete);
 				} catch (IOException e) {
@@ -201,7 +200,7 @@ public class InMemoryJavaCompiler {
 	private static class MemoryJavaFileManager extends ForwardingJavaFileManager<JavaFileManager> {
 		private final Map<String, ByteArrayOutputStream> outputStreams = new HashMap<>();
 
-		protected MemoryJavaFileManager(JavaFileManager fileManager) {
+		MemoryJavaFileManager(JavaFileManager fileManager) {
 			super(fileManager);
 		}
 
@@ -224,7 +223,7 @@ public class InMemoryJavaCompiler {
 		 * Safe to call after the file manager has been closed because the byte arrays are detached
 		 * from the underlying streams.
 		 */
-		public Map<String, byte[]> getCompiledBytecode() {
+		Map<String, byte[]> getCompiledBytecode() {
 			Map<String, byte[]> bytecodeMap = new HashMap<>();
 			for (Map.Entry<String, ByteArrayOutputStream> entry : outputStreams.entrySet()) {
 				bytecodeMap.put(entry.getKey(), entry.getValue().toByteArray());

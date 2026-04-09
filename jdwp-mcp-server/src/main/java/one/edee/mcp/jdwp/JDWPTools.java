@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -97,11 +98,13 @@ public class JDWPTools {
 		try {
 			return jdiService.connect(host, port);
 		} catch (Exception e) {
-			return String.format(
-				"[ERROR] Connection failed to %s:%d\n\n" +
-				"Make sure your JVM is running with JDWP enabled:\n" +
-				"  -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:%d\n\n" +
-				"Original error: %s",
+			return String.format("""
+				[ERROR] Connection failed to %s:%d
+
+				Make sure your JVM is running with JDWP enabled:
+				  -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:%d
+
+				Original error: %s""",
 				host, port, port, e.getMessage()
 			);
 		}
@@ -145,10 +148,12 @@ public class JDWPTools {
 			}
 		}
 
-		return String.format("[TIMEOUT] No JVM listening on %s:%d after %d attempt(s) over %dms.\n" +
-			"Last error: %s\n\n" +
-			"Make sure the target JVM was launched with -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:%d\n" +
-			"For Maven tests in this repo, use: mvn test -Dmaven.surefire.debug",
+		return String.format("""
+			[TIMEOUT] No JVM listening on %s:%d after %d attempt(s) over %dms.
+			Last error: %s
+
+			Make sure the target JVM was launched with -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:%d
+			For Maven tests in this repo, use: mvn test -Dmaven.surefire.debug""",
 			resolvedHost, resolvedPort, attempts, deadlineMs, lastError, resolvedPort);
 	}
 
@@ -197,7 +202,9 @@ public class JDWPTools {
 					try {
 						int frameCount = thread.frameCount();
 						result.append(String.format("  Frames: %d\n", frameCount));
-					} catch (IncompatibleThreadStateException ignored) {}
+					} catch (IncompatibleThreadStateException e) {
+						// Thread state changed between isSuspended() and frameCount()
+					}
 				}
 
 				result.append("\n");
@@ -787,7 +794,7 @@ public class JDWPTools {
 			int jdiPolicy = EventRequest.SUSPEND_ALL;
 			String policyLabel = "all";
 			if (suspendPolicy != null) {
-				switch (suspendPolicy.toLowerCase()) {
+				switch (suspendPolicy.toLowerCase(Locale.ROOT)) {
 					case "thread" -> { jdiPolicy = EventRequest.SUSPEND_EVENT_THREAD; policyLabel = "thread"; }
 					case "none" -> { jdiPolicy = EventRequest.SUSPEND_NONE; policyLabel = "none"; }
 					case "all" -> { /* default */ }
@@ -1141,13 +1148,15 @@ public class JDWPTools {
 			List<EventHistory.DebugEvent> events = eventHistory.getRecent(count);
 
 			if (events.isEmpty()) {
-				return "No events recorded yet.\n\n" +
-					"Events are captured automatically when connected:\n" +
-					"  - Breakpoint hits\n" +
-					"  - Step completions\n" +
-					"  - Exception throws\n" +
-					"  - Logpoint evaluations\n" +
-					"  - VM lifecycle events";
+				return """
+					No events recorded yet.
+
+					Events are captured automatically when connected:
+					  - Breakpoint hits
+					  - Step completions
+					  - Exception throws
+					  - Logpoint evaluations
+					  - VM lifecycle events""";
 			}
 
 			StringBuilder result = new StringBuilder();
@@ -1300,13 +1309,13 @@ public class JDWPTools {
 		String header = vmCleared
 			? "Reset complete (VM connection preserved)."
 			: "Reset complete (VM unreachable — server-local state cleared).";
-		return String.format(
-			"%s\n" +
-			"  Breakpoints cleared:           %d active + %d pending\n" +
-			"  Exception breakpoints cleared: %d active + %d pending\n" +
-			"  Watchers cleared:              %d\n" +
-			"  Event history cleared:         %d entries\n" +
-			"  Object cache cleared.",
+		return String.format("""
+			%s
+			  Breakpoints cleared:           %d active + %d pending
+			  Exception breakpoints cleared: %d active + %d pending
+			  Watchers cleared:              %d
+			  Event history cleared:         %d entries
+			  Object cache cleared.""",
 			header, activeBp, pendingBp, activeExBp, pendingExBp, watchers, events);
 	}
 
@@ -1464,14 +1473,16 @@ public class JDWPTools {
 			// Create the watcher
 			String watcherId = watcherManager.createWatcher(label, breakpointId, expression.trim());
 
-			return String.format(
-				"✓ Watcher attached successfully\n\n" +
-				"  Watcher ID: %s\n" +
-				"  Label: %s\n" +
-				"  Breakpoint: %d\n" +
-				"  Expression: %s\n\n" +
-				"The watcher will evaluate this expression when breakpoint %d is hit.\n" +
-				"Use jdwp_detach_watcher(watcherId) to remove it.",
+			return String.format("""
+				✓ Watcher attached successfully
+
+				  Watcher ID: %s
+				  Label: %s
+				  Breakpoint: %d
+				  Expression: %s
+
+				The watcher will evaluate this expression when breakpoint %d is hit.
+				Use jdwp_detach_watcher(watcherId) to remove it.""",
 				watcherId, label, breakpointId, expression.trim(), breakpointId
 			);
 

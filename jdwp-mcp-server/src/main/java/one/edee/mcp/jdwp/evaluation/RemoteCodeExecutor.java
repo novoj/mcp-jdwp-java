@@ -146,13 +146,13 @@ public class RemoteCodeExecutor {
 			Value loadedClassObject = classLoader.invokeMethod(
 				thread, defineClassMethod, args, ClassType.INVOKE_SINGLE_THREADED
 			);
-			if (!(loadedClassObject instanceof ClassObjectReference)) {
+			if (!(loadedClassObject instanceof ClassObjectReference classObjectReference)) {
 				log.error("[Executor] defineClass returned unexpected type: {}",
 					loadedClassObject != null ? loadedClassObject.getClass().getName() : "null");
 				throw new JdiEvaluationException("defineClass did not return a Class object.");
 			}
 
-			ClassType result = (ClassType) ((ClassObjectReference) loadedClassObject).reflectedType();
+			ClassType result = (ClassType) classObjectReference.reflectedType();
 			log.debug("[Executor] Class loaded and reflected successfully: {}", result.name());
 			return result;
 

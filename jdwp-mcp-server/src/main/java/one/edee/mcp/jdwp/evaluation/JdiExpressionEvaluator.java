@@ -390,7 +390,7 @@ public class JdiExpressionEvaluator {
 	 * <ul>
 	 *   <li>Regular string literals {@code "..."} with backslash escapes</li>
 	 *   <li>Java text blocks {@code """..."""} with multi-line content and escapes</li>
-	 *   <li>Character literals {@code '.'} including {@code '\u0041'} escapes</li>
+	 *   <li>Character literals {@code '.'} including {@code 'A'} escapes</li>
 	 *   <li>Qualified references — an identifier preceded by {@code .} (with optional whitespace)
 	 *       is treated as a field/method access on something else and is NOT rewritten</li>
 	 *   <li>Identifier characters per {@link Character#isJavaIdentifierStart(int)} /
@@ -555,7 +555,7 @@ public class JdiExpressionEvaluator {
 
 	/**
 	 * Returns the index just past the end of a char literal starting at position {@code start}.
-	 * Handles backslash escapes (including {@code '\u0041'} unicode escapes). Tolerant of
+	 * Handles backslash escapes (including {@code 'A'} unicode escapes). Tolerant of
 	 * unterminated literals — returns the end of the string in that case.
 	 */
 	private static int skipCharLiteral(String s, int start) {
@@ -591,9 +591,9 @@ public class JdiExpressionEvaluator {
 			this.signature = variables.stream().map(v -> v.type + " " + v.name).collect(Collectors.joining(","));
 		}
 
-		public List<ContextVariable> getVariables() { return variables; }
-		public List<Value> getValues() { return values; }
-		public String getSignature() { return signature; }
+		List<ContextVariable> getVariables() { return variables; }
+		List<Value> getValues() { return values; }
+		String getSignature() { return signature; }
 	}
 
 	/** Holds a compiled class name and its bytecode for caching across evaluations. */

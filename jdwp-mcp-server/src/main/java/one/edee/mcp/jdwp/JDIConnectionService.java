@@ -289,9 +289,11 @@ public class JDIConnectionService {
 
 		ObjectReference obj = objectCache.get(objectId);
 		if (obj == null) {
-			return String.format("[ERROR] Object #%d not found in cache\n\n" +
-				"This object was not previously discovered.\n" +
-				"Use jdwp_get_locals() to discover objects in the current scope.",
+			return String.format("""
+				[ERROR] Object #%d not found in cache
+
+				This object was not previously discovered.
+				Use jdwp_get_locals() to discover objects in the current scope.""",
 				objectId);
 		}
 

@@ -136,7 +136,7 @@ public class ClasspathDiscoverer {
                     // Target-OS heuristic: presence of `;` implies Windows, otherwise assume Unix.
                     // May be wrong on hybrid Cygwin/WSL setups where both separators appear.
                     final String separator = initialClasspath.contains(";") ? ";" : ":";
-                    final String[] entries = initialClasspath.split(separator);
+                    final String[] entries = initialClasspath.split(separator, -1);
                     for (String entry : entries) {
                         if (!entry.trim().isEmpty()) {
                             classpathEntries.add(entry.trim());

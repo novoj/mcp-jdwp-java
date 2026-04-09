@@ -78,18 +78,21 @@ public class JdkDiscoveryService {
 			}
 
 			// 4. Not found - throw explicit error
-			String errorMessage = String.format(
-				"No local JDK installation found for Java %d.\n\n" +
-				"The target JVM is running Java %s, but the MCP server cannot find a matching JDK.\n\n" +
-				"To fix this:\n" +
-				"  1. Install a Java %d JDK on the MCP server\n" +
-				"  2. Common locations checked:\n" +
-				"     - C:\\Program Files\\Eclipse Adoptium\\jdk-%d.*\n" +
-				"     - C:\\Program Files\\Java\\jdk-%d.*\n" +
-				"     - C:\\Program Files\\OpenJDK\\jdk-%d.*\n" +
-				"     - /usr/lib/jvm/java-%d-openjdk*\n" +
-				"     - /usr/lib/jvm/jdk-%d*\n\n" +
-				"Expression evaluation requires access to JDK system classes.",
+			String errorMessage = String.format("""
+				No local JDK installation found for Java %d.
+
+				The target JVM is running Java %s, but the MCP server cannot find a matching JDK.
+
+				To fix this:
+				  1. Install a Java %d JDK on the MCP server
+				  2. Common locations checked:
+				     - C:\\Program Files\\Eclipse Adoptium\\jdk-%d.*
+				     - C:\\Program Files\\Java\\jdk-%d.*
+				     - C:\\Program Files\\OpenJDK\\jdk-%d.*
+				     - /usr/lib/jvm/java-%d-openjdk*
+				     - /usr/lib/jvm/jdk-%d*
+
+				Expression evaluation requires access to JDK system classes.""",
 				targetMajorVersion, targetVersion, targetMajorVersion,
 				targetMajorVersion, targetMajorVersion, targetMajorVersion,
 				targetMajorVersion, targetMajorVersion
@@ -144,7 +147,7 @@ public class JdkDiscoveryService {
 		}
 
 		// For Java 9+, major version is the first number
-		String[] parts = version.split("\\.");
+		String[] parts = version.split("\\.", -1);
 		try {
 			return Integer.parseInt(parts[0]);
 		} catch (NumberFormatException e) {
@@ -193,7 +196,7 @@ public class JdkDiscoveryService {
 		List<String> paths = new ArrayList<>();
 
 		// Windows paths
-		if (System.getProperty("os.name").toLowerCase().contains("win")) {
+		if (System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win")) {
 			paths.add(String.format("C:\\Program Files\\Eclipse Adoptium\\jdk-%d", majorVersion));
 			paths.add(String.format("C:\\Program Files\\Java\\jdk-%d", majorVersion));
 			paths.add(String.format("C:\\Program Files\\OpenJDK\\jdk-%d", majorVersion));
@@ -218,7 +221,7 @@ public class JdkDiscoveryService {
 	private String searchDirectoriesForJdk(int majorVersion) {
 		List<Path> searchDirs = new ArrayList<>();
 
-		if (System.getProperty("os.name").toLowerCase().contains("win")) {
+		if (System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win")) {
 			searchDirs.add(Paths.get("C:\\Program Files\\Eclipse Adoptium"));
 			searchDirs.add(Paths.get("C:\\Program Files\\Java"));
 			searchDirs.add(Paths.get("C:\\Program Files\\OpenJDK"));

@@ -40,9 +40,9 @@ public final class ThreadFormatting {
 	};
 
 	/**
-	 * @return {@code true} if the given thread is JVM/JDK/test-runner internal and should be
-	 *         filtered out by default. Best-effort — any exception is treated as "internal" so
-	 *         we never crash inspecting a half-dead thread.
+	 * Returns {@code true} if the given thread is JVM/JDK/test-runner internal and should be
+	 * filtered out by default. Best-effort — any exception is treated as "internal" so
+	 * we never crash inspecting a half-dead thread.
 	 */
 	public static boolean isJvmInternalThread(ThreadReference t) {
 		try {
