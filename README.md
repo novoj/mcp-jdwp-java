@@ -116,16 +116,10 @@ This doubles as a setup verification — if you can solve these, everything work
 
 ### How to launch a test flight
 
-**Terminal 1** — start the broken test, suspended:
-
-```bash
-mvn -pl jdwp-sandbox test -Dtest=<TestClass> -DskipTests=false -Dmaven.surefire.debug
-```
-
-**Terminal 2** — start Claude Code from the repo root and type:
+Start Claude Code from the repo root and type:
 
 ```
-The test <TestClass> is failing — find the root cause.
+Use JDWP to debug <TestClass> in the jdwp-sandbox module — the test is failing, find the root cause.
 ```
 
 ---
@@ -133,10 +127,6 @@ The test <TestClass> is failing — find the root cause.
 ### #1 The Vanishing Pennies
 
 **Difficulty:** Warm-up | **Test:** `OrderProcessorTest` | **Package:** `order`
-
-```bash
-mvn -pl jdwp-sandbox test -Dtest=OrderProcessorTest -DskipTests=false -Dmaven.surefire.debug
-```
 
 **Symptom:** `expected 71.982 but was 71.0` — the order total loses its decimal part somewhere between calculation and return.
 
@@ -157,10 +147,6 @@ mvn -pl jdwp-sandbox test -Dtest=OrderProcessorTest -DskipTests=false -Dmaven.su
 
 **Difficulty:** Moderate | **Test:** `SessionStoreTest` | **Package:** `session`
 
-```bash
-mvn -pl jdwp-sandbox test -Dtest=SessionStoreTest -DskipTests=false -Dmaven.surefire.debug
-```
-
 **Symptom:** `retrieve() returned null` — a session was stored, upgraded, and then... vanished from the map.
 
 **Hint:** The session is still *in* the HashMap. The HashMap just can't *find* it anymore.
@@ -179,10 +165,6 @@ mvn -pl jdwp-sandbox test -Dtest=SessionStoreTest -DskipTests=false -Dmaven.sure
 ### #3 The Swallowed Exception
 
 **Difficulty:** Moderate | **Test:** `EventBusTest` | **Package:** `events`
-
-```bash
-mvn -pl jdwp-sandbox test -Dtest=EventBusTest -DskipTests=false -Dmaven.surefire.debug
-```
 
 **Symptom:** `expected stock < 100 but was 100` and no error summary — the order was supposed to reserve inventory, but nothing happened and nobody complained.
 
@@ -205,10 +187,6 @@ mvn -pl jdwp-sandbox test -Dtest=EventBusTest -DskipTests=false -Dmaven.surefire
 
 **Difficulty:** Hard | **Test:** `ConfigurationProviderTest` | **Package:** `config`
 
-```bash
-mvn -pl jdwp-sandbox test -Dtest=ConfigurationProviderTest -DskipTests=false -Dmaven.surefire.debug
-```
-
 **Symptom:** `expected timeout=5000 but was 0` — the configuration exists but its timeout field is still at the default value.
 
 **Hint:** The config object is assigned to the shared field *before* it's fully initialized. A reader thread sees the reference but reads a half-constructed object.
@@ -228,10 +206,6 @@ mvn -pl jdwp-sandbox test -Dtest=ConfigurationProviderTest -DskipTests=false -Dm
 
 **Difficulty:** Hard | **Test:** `TransferServiceTest` | **Package:** `bank`
 
-```bash
-mvn -pl jdwp-sandbox test -Dtest=TransferServiceTest -DskipTests=false -Dmaven.surefire.debug
-```
-
 **Symptom:** `expected discrepancy=0 but was non-zero` — money is neither created nor destroyed, yet the audit says the books don't balance.
 
 **Hint:** The transfer moves money in two steps. The audit snapshot is taken between them.
@@ -249,12 +223,12 @@ mvn -pl jdwp-sandbox test -Dtest=TransferServiceTest -DskipTests=false -Dmaven.s
 
 ### Scorecard
 
-| Solved | Rating |
-|--------|--------|
-| 0-1 | The JVM is winning. Check your setup. |
-| 2-3 | Solid start. You're getting the hang of breakpoint-driven debugging. |
-| 4 | Impressive. You found bugs that would take hours with println. |
-| 5 | Bug terminator. Nothing survives your debugger. |
+| Solved | Rating                                                               |
+|--------|----------------------------------------------------------------------|
+| 0-1    | The JVM is winning. Check your setup.                                |
+| 2-3    | Solid start. You're getting the hang of breakpoint-driven debugging. |
+| 4      | Impressive. You found bugs that would take hours with println.       |
+| 5      | Bug terminator. Nothing survives your debugger.                      |
 
 ## Features beyond standard JDWP
 
@@ -394,83 +368,83 @@ Returns thread info, top stack frames, locals at frame 0, and `this` fields in a
 
 ### Connection (3)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `jdwp_connect` | — | Connect to JDWP on configured host:port |
-| `jdwp_disconnect` | — | Disconnect (sends JDWP Dispose) |
+| Tool                   | Parameters                     | Description                              |
+|------------------------|--------------------------------|------------------------------------------|
+| `jdwp_connect`         | —                              | Connect to JDWP on configured host:port  |
+| `jdwp_disconnect`      | —                              | Disconnect (sends JDWP Dispose)          |
 | `jdwp_wait_for_attach` | `host?`, `port?`, `timeoutMs?` | Poll until JVM is listening, then attach |
 
 ### Inspection (8)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `jdwp_get_version` | — | JVM version info |
-| `jdwp_get_threads` | `includeSystemThreads?` | List threads with status and frame counts |
-| `jdwp_get_stack` | `threadId`, `maxFrames?`, `includeNoise?` | Stack trace (noise frames collapsed by default) |
-| `jdwp_get_locals` | `threadId`, `frameIndex` | Local variables at a frame (includes `this`) |
-| `jdwp_get_fields` | `objectId` | Object fields, collection elements, or array contents |
-| `jdwp_to_string` | `objectId`, `threadId` | Invoke `toString()` on a cached object |
-| `jdwp_get_breakpoint_context` | `maxFrames?`, `includeThisFields?` | One-shot context dump at current breakpoint |
-| `jdwp_get_current_thread` | — | Thread ID of the last breakpoint hit |
+| Tool                          | Parameters                                | Description                                           |
+|-------------------------------|-------------------------------------------|-------------------------------------------------------|
+| `jdwp_get_version`            | —                                         | JVM version info                                      |
+| `jdwp_get_threads`            | `includeSystemThreads?`                   | List threads with status and frame counts             |
+| `jdwp_get_stack`              | `threadId`, `maxFrames?`, `includeNoise?` | Stack trace (noise frames collapsed by default)       |
+| `jdwp_get_locals`             | `threadId`, `frameIndex`                  | Local variables at a frame (includes `this`)          |
+| `jdwp_get_fields`             | `objectId`                                | Object fields, collection elements, or array contents |
+| `jdwp_to_string`              | `objectId`, `threadId`                    | Invoke `toString()` on a cached object                |
+| `jdwp_get_breakpoint_context` | `maxFrames?`, `includeThisFields?`        | One-shot context dump at current breakpoint           |
+| `jdwp_get_current_thread`     | —                                         | Thread ID of the last breakpoint hit                  |
 
 ### Execution control (7)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `jdwp_resume` | — | Resume all threads |
-| `jdwp_resume_thread` | `threadId` | Resume a specific thread |
-| `jdwp_suspend_thread` | `threadId` | Suspend a specific thread |
+| Tool                      | Parameters   | Description                                           |
+|---------------------------|--------------|-------------------------------------------------------|
+| `jdwp_resume`             | —            | Resume all threads                                    |
+| `jdwp_resume_thread`      | `threadId`   | Resume a specific thread                              |
+| `jdwp_suspend_thread`     | `threadId`   | Suspend a specific thread                             |
 | `jdwp_resume_until_event` | `timeoutMs?` | Resume and block until next breakpoint/step/exception |
-| `jdwp_step_over` | `threadId` | Step over (F6) |
-| `jdwp_step_into` | `threadId` | Step into (F7) |
-| `jdwp_step_out` | `threadId` | Step out (Shift+F8) |
+| `jdwp_step_over`          | `threadId`   | Step over (F6)                                        |
+| `jdwp_step_into`          | `threadId`   | Step into (F7)                                        |
+| `jdwp_step_out`           | `threadId`   | Step out (Shift+F8)                                   |
 
 ### Breakpoints (9)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `jdwp_set_breakpoint` | `className`, `lineNumber`, `suspendPolicy?`, `condition?` | Set breakpoint (supports conditions and deferred) |
-| `jdwp_set_logpoint` | `className`, `lineNumber`, `expression`, `condition?` | Non-stopping breakpoint that logs expression result |
-| `jdwp_clear_breakpoint` | `className`, `lineNumber` | Remove breakpoint by location |
-| `jdwp_clear_breakpoint_by_id` | `breakpointId` | Remove breakpoint by ID |
-| `jdwp_list_breakpoints` | — | List all breakpoints (active, pending, failed) |
-| `jdwp_clear_all_breakpoints` | — | Remove all breakpoints |
-| `jdwp_set_exception_breakpoint` | `exceptionClass`, `caught?`, `uncaught?` | Break on exception throw (supports deferred) |
-| `jdwp_clear_exception_breakpoint` | `breakpointId` | Remove exception breakpoint |
-| `jdwp_list_exception_breakpoints` | — | List exception breakpoints (active and pending) |
+| Tool                              | Parameters                                                | Description                                         |
+|-----------------------------------|-----------------------------------------------------------|-----------------------------------------------------|
+| `jdwp_set_breakpoint`             | `className`, `lineNumber`, `suspendPolicy?`, `condition?` | Set breakpoint (supports conditions and deferred)   |
+| `jdwp_set_logpoint`               | `className`, `lineNumber`, `expression`, `condition?`     | Non-stopping breakpoint that logs expression result |
+| `jdwp_clear_breakpoint`           | `className`, `lineNumber`                                 | Remove breakpoint by location                       |
+| `jdwp_clear_breakpoint_by_id`     | `breakpointId`                                            | Remove breakpoint by ID                             |
+| `jdwp_list_breakpoints`           | —                                                         | List all breakpoints (active, pending, failed)      |
+| `jdwp_clear_all_breakpoints`      | —                                                         | Remove all breakpoints                              |
+| `jdwp_set_exception_breakpoint`   | `exceptionClass`, `caught?`, `uncaught?`                  | Break on exception throw (supports deferred)        |
+| `jdwp_clear_exception_breakpoint` | `breakpointId`                                            | Remove exception breakpoint                         |
+| `jdwp_list_exception_breakpoints` | —                                                         | List exception breakpoints (active and pending)     |
 
 ### Expression evaluation and mutation (4)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `jdwp_evaluate_expression` | `threadId`, `expression`, `frameIndex?` | Evaluate Java expression at suspended frame |
-| `jdwp_assert_expression` | `expression`, `expected`, `threadId`, `frameIndex?` | Evaluate and compare against expected value |
-| `jdwp_set_local` | `threadId`, `frameIndex`, `varName`, `value` | Set a local variable's value |
-| `jdwp_set_field` | `objectId`, `fieldName`, `value` | Set a field's value on a cached object |
+| Tool                       | Parameters                                          | Description                                 |
+|----------------------------|-----------------------------------------------------|---------------------------------------------|
+| `jdwp_evaluate_expression` | `threadId`, `expression`, `frameIndex?`             | Evaluate Java expression at suspended frame |
+| `jdwp_assert_expression`   | `expression`, `expected`, `threadId`, `frameIndex?` | Evaluate and compare against expected value |
+| `jdwp_set_local`           | `threadId`, `frameIndex`, `varName`, `value`        | Set a local variable's value                |
+| `jdwp_set_field`           | `objectId`, `fieldName`, `value`                    | Set a field's value on a cached object      |
 
 ### Events (2)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `jdwp_get_events` | `count?` | Recent events (breakpoints, steps, exceptions, logpoints) |
-| `jdwp_clear_events` | — | Clear event history |
+| Tool                | Parameters | Description                                               |
+|---------------------|------------|-----------------------------------------------------------|
+| `jdwp_get_events`   | `count?`   | Recent events (breakpoints, steps, exceptions, logpoints) |
+| `jdwp_clear_events` | —          | Clear event history                                       |
 
 ### Watchers (6)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `jdwp_attach_watcher` | `breakpointId`, `label`, `expression` | Attach expression watcher to a breakpoint |
-| `jdwp_detach_watcher` | `watcherId` | Remove a watcher |
-| `jdwp_list_watchers_for_breakpoint` | `breakpointId` | List watchers on a breakpoint |
-| `jdwp_list_all_watchers` | — | List all watchers across all breakpoints |
-| `jdwp_evaluate_watchers` | `threadId`, `scope`, `breakpointId?` | Evaluate watchers (`current_frame` or `full_stack`) |
-| `jdwp_clear_all_watchers` | — | Remove all watchers |
+| Tool                                | Parameters                            | Description                                         |
+|-------------------------------------|---------------------------------------|-----------------------------------------------------|
+| `jdwp_attach_watcher`               | `breakpointId`, `label`, `expression` | Attach expression watcher to a breakpoint           |
+| `jdwp_detach_watcher`               | `watcherId`                           | Remove a watcher                                    |
+| `jdwp_list_watchers_for_breakpoint` | `breakpointId`                        | List watchers on a breakpoint                       |
+| `jdwp_list_all_watchers`            | —                                     | List all watchers across all breakpoints            |
+| `jdwp_evaluate_watchers`            | `threadId`, `scope`, `breakpointId?`  | Evaluate watchers (`current_frame` or `full_stack`) |
+| `jdwp_clear_all_watchers`           | —                                     | Remove all watchers                                 |
 
 ### Session (1)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `jdwp_reset` | — | Clear all state (breakpoints, watchers, cache, events) without disconnecting |
+| Tool         | Parameters | Description                                                                  |
+|--------------|------------|------------------------------------------------------------------------------|
+| `jdwp_reset` | —          | Clear all state (breakpoints, watchers, cache, events) without disconnecting |
 
 ## Usage workflows
 
@@ -551,14 +525,14 @@ The server is `SYNC` mode, `web-application-type=none` — JSON over STDIO, no H
 
 ### Core components
 
-| Component | Role |
-|-----------|------|
-| **JDWPTools** | 40 `@McpTool` methods — the MCP surface. Thin orchestration over services below. |
+| Component                | Role                                                                                                                                               |
+|--------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
+| **JDWPTools**            | 40 `@McpTool` methods — the MCP surface. Thin orchestration over services below.                                                                   |
 | **JDIConnectionService** | Singleton `VirtualMachine` connection. Object cache (`ConcurrentHashMap<Long, ObjectReference>`), smart collection rendering, classpath discovery. |
-| **BreakpointTracker** | Breakpoint registry with synthetic IDs. Tracks pending/deferred state, conditions, logpoint expressions, exception breakpoints. |
-| **JdiEventListener** | Daemon thread consuming the JDI event queue. Routes events, evaluates conditions/logpoints, handles recursive suppression. |
-| **EvaluationGuard** | Per-thread reentrancy guard preventing deadlocks during expression evaluation. |
-| **EventHistory** | Ring buffer of the last 100 JDWP events (including suppressed). |
+| **BreakpointTracker**    | Breakpoint registry with synthetic IDs. Tracks pending/deferred state, conditions, logpoint expressions, exception breakpoints.                    |
+| **JdiEventListener**     | Daemon thread consuming the JDI event queue. Routes events, evaluates conditions/logpoints, handles recursive suppression.                         |
+| **EvaluationGuard**      | Per-thread reentrancy guard preventing deadlocks during expression evaluation.                                                                     |
+| **EventHistory**         | Ring buffer of the last 100 JDWP events (including suppressed).                                                                                    |
 
 ### Expression evaluation pipeline (`evaluation/`)
 
@@ -631,14 +605,14 @@ mcp-jdwp-java/
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| `tools.jar not found` / `jdk.jdi not available` | Ensure `JAVA_HOME` points to a JDK, not a JRE. Launch with `--add-modules jdk.jdi`. |
-| Connection refused | Verify target JVM has `-agentlib:jdwp=...address=*:5005`. Check port matches `-DJVM_JDWP_PORT`. |
-| MCP server doesn't respond | Rebuild: `mvn clean package -DskipTests`. Check jar path. Restart Claude Code. |
-| MCP server times out on startup | JVM startup takes several seconds. Ensure `MCP_TIMEOUT=30000` (or higher) is set in the MCP registration — the default is too short for a Spring Boot Java process. |
-| "Thread is not suspended" | The thread must be stopped at a breakpoint for stack/locals/expression tools. |
-| Expression evaluation timeout | First evaluation is slow (classpath discovery). Increase `MCP_TOOL_TIMEOUT`. Subsequent evaluations use cache. |
+| Problem                                         | Solution                                                                                                                                                            |
+|-------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `tools.jar not found` / `jdk.jdi not available` | Ensure `JAVA_HOME` points to a JDK, not a JRE. Launch with `--add-modules jdk.jdi`.                                                                                 |
+| Connection refused                              | Verify target JVM has `-agentlib:jdwp=...address=*:5005`. Check port matches `-DJVM_JDWP_PORT`.                                                                     |
+| MCP server doesn't respond                      | Rebuild: `mvn clean package -DskipTests`. Check jar path. Restart Claude Code.                                                                                      |
+| MCP server times out on startup                 | JVM startup takes several seconds. Ensure `MCP_TIMEOUT=30000` (or higher) is set in the MCP registration — the default is too short for a Spring Boot Java process. |
+| "Thread is not suspended"                       | The thread must be stopped at a breakpoint for stack/locals/expression tools.                                                                                       |
+| Expression evaluation timeout                   | First evaluation is slow (classpath discovery). Increase `MCP_TOOL_TIMEOUT`. Subsequent evaluations use cache.                                                      |
 
 ## License
 
