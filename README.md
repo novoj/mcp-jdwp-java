@@ -126,14 +126,11 @@ This doubles as a setup verification — if you can solve these, everything work
 mvn -pl jdwp-sandbox test -Dtest=<TestClass> -DskipTests=false -Dmaven.surefire.debug
 ```
 
-**Terminal 2 (Claude Code)** — attach and hunt:
+**Terminal 2** — start Claude Code from the repo root and type:
 
 ```
-Attach to the JVM on port 5005 and debug <TestClass>.
-The test is failing — find the root cause.
+The test <TestClass> is failing — find the root cause.
 ```
-
-Claude will use `jdwp_wait_for_attach()`, set breakpoints, and start investigating.
 
 ---
 
