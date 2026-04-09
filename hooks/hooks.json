@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "test -f \"${CLAUDE_PLUGIN_ROOT}/jdwp-mcp-server/target/mcp-jdwp-java.jar\" || mvn -f \"${CLAUDE_PLUGIN_ROOT}/pom.xml\" -pl jdwp-mcp-server -am package -DskipTests -q"
+          }
+        ]
+      }
+    ]
+  }
+}

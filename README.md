@@ -38,26 +38,22 @@ Installs the MCP server, the `java-debug` skill (debugging workflows, recipes, g
 /plugin install jdwp-debugging@mcp-jdwp-java
 ```
 
-### 2. Build the server JAR
-
-The plugin needs a compiled JAR. From the installed plugin directory (or a local clone):
-
-```bash
-mvn clean package -DskipTests
-```
-
-Produces: `jdwp-mcp-server/target/mcp-jdwp-java.jar`
-
-### 3. Restart Claude Code
-
-To pick up the plugin and MCP server.
+The server JAR is built automatically on first session start (requires JDK 17+ and Maven on PATH). Restart Claude Code to pick up the plugin.
 
 <details>
 <summary><strong>Alternative: manual MCP registration (without plugin)</strong></summary>
 
-If you prefer to register the MCP server directly without the plugin (no skill included):
+If you prefer to register the MCP server directly without the plugin (no skill, no auto-build):
 
-**CLI:**
+**1. Build the JAR:**
+
+```bash
+git clone https://github.com/FgForrest/mcp-jdwp-java.git
+cd mcp-jdwp-java
+mvn clean package -DskipTests
+```
+
+**2. Register with Claude Code:**
 
 ```bash
 claude mcp add jdwp-inspector -s user \
@@ -96,7 +92,7 @@ Drop `-s user` to scope to the current project only.
 
 </details>
 
-### 4. Launch your Java application with JDWP
+### 2. Launch your Java application with JDWP
 
 **Maven Surefire (test debugging):**
 
@@ -588,6 +584,8 @@ mcp-jdwp-java/
 ├── .claude-plugin/
 │   ├── plugin.json                      # Claude Code plugin metadata
 │   └── marketplace.json                 # Plugin marketplace registry
+├── hooks/
+│   └── hooks.json                       # SessionStart hook: auto-builds JAR if missing
 ├── skills/
 │   └── java-debug/
 │       ├── SKILL.md                     # Debugging skill (workflows, recipes, gotchas)
