@@ -53,7 +53,7 @@
     </dependencies>
 
     <build>
-        <finalName>mcp-jdwp-java-1.0.0</finalName>
+        <finalName>mcp-jdwp-java</finalName>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>

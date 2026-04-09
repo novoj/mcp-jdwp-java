@@ -1,0 +1,7 @@
+{
+  "name": "jdwp-debugging",
+  "description": "Java JDWP debugger via MCP — set breakpoints, inspect runtime state, evaluate expressions, mutate variables, catch exceptions at throw site, trace execution with logpoints.",
+  "author": {
+    "name": "Jan (Novoj) Novotný"
+  }
+}

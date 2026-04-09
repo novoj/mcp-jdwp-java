@@ -34,17 +34,30 @@ cd mcp-jdwp-java
 mvn clean package -DskipTests
 ```
 
-Produces: `jdwp-mcp-server/target/mcp-jdwp-java-1.0.0.jar`
+Produces: `jdwp-mcp-server/target/mcp-jdwp-java.jar`
 
 ### 2. Register with Claude Code
 
-**Option A: CLI (recommended)**
+**Option A: Plugin (recommended — includes debugging skill)**
+
+Install as a Claude Code plugin to get both the MCP server and the `java-debug` skill (debugging recipes, workflows, and gotchas that teach Claude how to use the tools effectively):
+
+```bash
+claude plugin add /path/to/mcp-jdwp-java
+```
+
+The plugin bundles:
+- `.mcp.json` — MCP server configuration
+- `skills/java-debug/SKILL.md` — debugging workflows and recipes
+- `.claude-plugin/plugin.json` — plugin metadata
+
+**Option B: CLI**
 
 ```bash
 claude mcp add jdwp-inspector -s user \
   -e MCP_TIMEOUT=30000 \
   -e MCP_TOOL_TIMEOUT=120000 \
-  -- java --add-modules jdk.jdi -jar /path/to/mcp-jdwp-java-1.0.0.jar
+  -- java --add-modules jdk.jdi -jar /path/to/mcp-jdwp-java.jar
 ```
 
 To change the JDWP port (default 5005):
@@ -53,7 +66,7 @@ To change the JDWP port (default 5005):
 claude mcp add jdwp-inspector -s user \
   -e MCP_TIMEOUT=30000 \
   -e MCP_TOOL_TIMEOUT=120000 \
-  -- java --add-modules jdk.jdi -DJVM_JDWP_PORT=12345 -jar /path/to/mcp-jdwp-java-1.0.0.jar
+  -- java --add-modules jdk.jdi -DJVM_JDWP_PORT=12345 -jar /path/to/mcp-jdwp-java.jar
 ```
 
 The `MCP_TIMEOUT` and `MCP_TOOL_TIMEOUT` environment variables are important — JVM startup is not instant (class loading, Spring context initialization), so the default MCP timeouts will cause Claude Code to give up before the server is ready. `MCP_TIMEOUT=30000` gives the server 30 seconds to start, and `MCP_TOOL_TIMEOUT=120000` allows up to 2 minutes for long-running tools like first-time expression evaluation (which discovers the target's classpath and compiles bytecode).
@@ -62,7 +75,7 @@ Re-installing requires removing first: `claude mcp remove jdwp-inspector -s user
 
 Drop `-s user` to scope to the current project only.
 
-**Option B: `.mcp.json`**
+**Option C: `.mcp.json`**
 
 ```json
 {
@@ -71,7 +84,7 @@ Drop `-s user` to scope to the current project only.
       "command": "java",
       "args": [
         "--add-modules", "jdk.jdi",
-        "-jar", "/path/to/mcp-jdwp-java-1.0.0.jar"
+        "-jar", "/path/to/mcp-jdwp-java.jar"
       ],
       "env": {
         "MCP_TIMEOUT": "30000",
@@ -165,7 +178,7 @@ jdwp_evaluate_expression(
 
 Compiles arbitrary Java expressions to bytecode using Eclipse JDT, injects them into the target JVM via `ClassLoader.defineClass()`, and executes them in the context of the suspended frame. Full classpath is discovered automatically (including container classloaders like Tomcat). Results are cached for performance. Handles Guice/CGLIB proxies automatically.
 
-See [EXPRESSION_EVALUATION.md](EXPRESSION_EVALUATION.md) for the compilation pipeline details.
+See [docs/EXPRESSION_EVALUATION.md](docs/EXPRESSION_EVALUATION.md) for the compilation pipeline details.
 
 ### Assertions
 
@@ -426,7 +439,17 @@ mcp-jdwp-java/
 ├── mvnw / mvnw.cmd                      # Maven wrapper
 ├── README.md
 ├── WORKFLOW.md                          # Development guide
-├── EXPRESSION_EVALUATION.md             # Expression evaluation pipeline docs
+├── .mcp.json                            # MCP server configuration
+├── .claude-plugin/
+│   └── plugin.json                      # Claude Code plugin metadata
+├── skills/
+│   └── java-debug/
+│       ├── SKILL.md                     # Debugging skill (workflows, recipes, gotchas)
+│       └── references/
+│           ├── prerequisites.md         # Build-system-specific JDWP launch details
+│           └── troubleshooting.md       # MCP server troubleshooting
+├── docs/
+│   └── EXPRESSION_EVALUATION.md         # Expression evaluation pipeline docs
 │
 ├── jdwp-mcp-server/                     # The MCP server
 │   ├── pom.xml
