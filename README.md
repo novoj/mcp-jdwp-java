@@ -112,6 +112,157 @@ Starts the JVM with JDWP on port 5005, suspended until a debugger connects.
 -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005
 ```
 
+## Find the Bug — test flights
+
+The `jdwp-sandbox` module ships 5 deliberately broken Java classes. Each one compiles fine, looks reasonable at first glance, and **fails its test with a confusing message**. Your job: attach with the JDWP MCP server and find the root cause.
+
+This doubles as a setup verification — if you can solve these, everything works.
+
+### How to launch a test flight
+
+**Terminal 1** — start the broken test, suspended:
+
+```bash
+mvn -pl jdwp-sandbox test -Dtest=<TestClass> -DskipTests=false -Dmaven.surefire.debug
+```
+
+**Terminal 2 (Claude Code)** — attach and hunt:
+
+```
+Attach to the JVM on port 5005 and debug <TestClass>.
+The test is failing — find the root cause.
+```
+
+Claude will use `jdwp_wait_for_attach()`, set breakpoints, and start investigating.
+
+---
+
+### #1 The Vanishing Pennies
+
+**Difficulty:** Warm-up | **Test:** `OrderProcessorTest` | **Package:** `order`
+
+```bash
+mvn -pl jdwp-sandbox test -Dtest=OrderProcessorTest -DskipTests=false -Dmaven.surefire.debug
+```
+
+**Symptom:** `expected 71.982 but was 71.0` — the order total loses its decimal part somewhere between calculation and return.
+
+**Hint:** The calculation is correct. Something *after* it changes the total. Who would mutate an order during logging?
+
+<details>
+<summary><strong>Reveal root cause</strong></summary>
+
+`AuditLogger.log(order)` calls `cacheFormattedTotal(order)`, which silently mutates the order: `order.setTotal((double)(int)(order.getTotal()))` — truncating 71.982 to 71.0. The caller assumes `log()` is read-only, but it isn't.
+
+**Debug path:** Set a breakpoint in `OrderProcessor.process()`, step over the `log()` call, and eval `order.getTotal()` before and after. The value changes across what should be a side-effect-free call.
+
+</details>
+
+---
+
+### #2 The Phantom Session
+
+**Difficulty:** Moderate | **Test:** `SessionStoreTest` | **Package:** `session`
+
+```bash
+mvn -pl jdwp-sandbox test -Dtest=SessionStoreTest -DskipTests=false -Dmaven.surefire.debug
+```
+
+**Symptom:** `retrieve() returned null` — a session was stored, upgraded, and then... vanished from the map.
+
+**Hint:** The session is still *in* the HashMap. The HashMap just can't *find* it anymore.
+
+<details>
+<summary><strong>Reveal root cause</strong></summary>
+
+`UserSession` is used as a HashMap key, with both `userId` and `role` in `hashCode()`. `upgradeUserRole()` calls `session.upgradeRole("PREMIUM")`, which mutates `role` — changing the hashCode while the key is still in the map. The entry sits in the old hash bucket; lookups compute the new hash and search the wrong bucket.
+
+**Debug path:** Breakpoint before and after `upgradeRole()`. Use `jdwp_assert_expression("session.hashCode()", "<value-before>")` after the upgrade — `MISMATCH` confirms the hash drifted.
+
+</details>
+
+---
+
+### #3 The Swallowed Exception
+
+**Difficulty:** Moderate | **Test:** `EventBusTest` | **Package:** `events`
+
+```bash
+mvn -pl jdwp-sandbox test -Dtest=EventBusTest -DskipTests=false -Dmaven.surefire.debug
+```
+
+**Symptom:** `expected stock < 100 but was 100` and no error summary — the order was supposed to reserve inventory, but nothing happened and nobody complained.
+
+**Hint:** There are actually *two* bugs. One is hiding the other. Start with the exception — why isn't the error summary showing anything?
+
+<details>
+<summary><strong>Reveal root cause</strong></summary>
+
+**Bug 1 (hidden):** `OrderEvent` casts the raw quantity through `byte`: a quantity of 200 overflows to -56. `Inventory.reserve()` throws `IllegalStateException("Cannot reserve negative quantity: -56")`.
+
+**Bug 2 (hiding bug 1):** `EventBus.dispatch()` catches the exception and wraps it in `CompletionException` -> `EventHandlerException` -> original cause. But `getErrorSummary()` only reports top-level messages ("Async task failed"), losing the root cause entirely.
+
+**Debug path:** Set an exception breakpoint on `IllegalStateException`. The throw site reveals the -56 quantity. Then inspect the `OrderEvent` construction to see the byte cast.
+
+</details>
+
+---
+
+### #4 The Time Traveler's Config
+
+**Difficulty:** Hard | **Test:** `ConfigurationProviderTest` | **Package:** `config`
+
+```bash
+mvn -pl jdwp-sandbox test -Dtest=ConfigurationProviderTest -DskipTests=false -Dmaven.surefire.debug
+```
+
+**Symptom:** `expected timeout=5000 but was 0` — the configuration exists but its timeout field is still at the default value.
+
+**Hint:** The config object is assigned to the shared field *before* it's fully initialized. A reader thread sees the reference but reads a half-constructed object.
+
+<details>
+<summary><strong>Reveal root cause</strong></summary>
+
+`ConfigurationProvider.getConfig()` assigns `instance = new Configuration(...)` and then signals a latch — but calls `instance.init()` (which sets `timeout=5000`) *after* the latch release. A reader thread waiting on that latch sees `instance != null` and returns the un-initialized object with `timeout=0`.
+
+**Debug path:** Set breakpoints in both the initializer and reader paths of `getConfig()`. Use `jdwp_get_threads()` to see both threads, then inspect the `Configuration` object from each thread's perspective. The initializer hasn't called `init()` yet when the reader returns.
+
+</details>
+
+---
+
+### #5 The Audit That Lies
+
+**Difficulty:** Hard | **Test:** `TransferServiceTest` | **Package:** `bank`
+
+```bash
+mvn -pl jdwp-sandbox test -Dtest=TransferServiceTest -DskipTests=false -Dmaven.surefire.debug
+```
+
+**Symptom:** `expected discrepancy=0 but was non-zero` — money is neither created nor destroyed, yet the audit says the books don't balance.
+
+**Hint:** The transfer moves money in two steps. The audit snapshot is taken between them.
+
+<details>
+<summary><strong>Reveal root cause</strong></summary>
+
+`TransferService.transfer()` is not atomic: it calls `source.withdraw()`, then `auditService.snapshotBalances()`, then `destination.deposit()`. The snapshot captures the intermediate state where money has left the source but hasn't arrived at the destination — showing a total of 1500 instead of 2000.
+
+**Debug path:** Set breakpoints on `withdraw()`, `snapshotBalances()`, and `deposit()`. Step through and eval `source.getBalance() + destination.getBalance()` at each stop. The total drops after withdraw and recovers after deposit — the snapshot catches the dip.
+
+</details>
+
+---
+
+### Scorecard
+
+| Solved | Rating |
+|--------|--------|
+| 0-1 | The JVM is winning. Check your setup. |
+| 2-3 | Solid start. You're getting the hang of breakpoint-driven debugging. |
+| 4 | Impressive. You found bugs that would take hours with println. |
+| 5 | Bug terminator. Nothing survives your debugger. |
+
 ## Features beyond standard JDWP
 
 These are the capabilities this server adds on top of raw JDI — the reason to use it instead of writing JDI calls directly.
